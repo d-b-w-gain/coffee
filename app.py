@@ -33,6 +33,13 @@ BARISTA_NAME = os.environ.get("BARISTA_NAME", "Dan")
 BARISTA_NUMBER = os.environ.get("BARISTA_NUMBER") or SIGNAL_RECIPIENT
 REQUEST_GAP_S = 60  # one coffee request a minute, so a double tap isn't two messages
 
+# Spruik phones the barista (Signal voice, Kokoro speech) if an order isn't started:
+# not marked made, and the machine not switched on since the order came in.
+CALL_URL = os.environ.get("SPRUIK_ANNOUNCE_URL", "http://signal-call-bridge.cnc-controller.svc:9091/announce")
+CALL_VOICE = os.environ.get("SPRUIK_ANNOUNCE_VOICE", "af_heart")
+NUDGE_AFTER_MIN = [int(m) for m in os.environ.get("NUDGE_AFTER_MINUTES", "5,15").split(",") if m.strip()]
+calling: set[str] = set()  # order ids with a call in progress
+
 MENU = {
     "drink": ["Flat white", "Latte", "Cappuccino", "Piccolo", "Macchiato", "Long black", "Espresso"],
     "milk": ["Full cream", "Oat", "No milk"],
@@ -309,7 +316,62 @@ async def watchdog(app):
                 log.warning("auto-off failed: %s", e)
         if any(o["created"] < now - ORDER_TTL_S for o in orders.values()):
             save_orders()  # drop orders older than 6 h
+        check_nudges(now)
         await asyncio.sleep(POLL_S)
+
+
+def started(o):
+    """Made, or the machine switched on after the order (not by the order's own warm-up)."""
+    if o["status"] != "waiting":
+        return True
+    since = state.get("on_since")
+    return bool(state.get("is_on") and since and since > o["created"] and not o.get("warmed"))
+
+
+def spoken(o):
+    """The order summary, worded for speech."""
+    return describe(o).replace(" (½ decaf)", "").replace("&", "and")
+
+
+def check_nudges(now):
+    for oid, o in list(orders.items()):
+        done = o.get("nudges", 0)
+        if oid in calling or done >= len(NUDGE_AFTER_MIN) or started(o):
+            continue
+        if now - o["created"] >= NUDGE_AFTER_MIN[done] * 60:
+            calling.add(oid)
+            asyncio.create_task(nudge(oid))
+
+
+async def nudge(oid):
+    """Ring the barista through Spruik and say what's waiting."""
+    try:
+        o = orders.get(oid)
+        if not o or started(o):
+            return
+        mins = max(1, int((time.time() - o["created"]) // 60))
+        who = "Someone" if o["who"] == "someone" else o["who"]
+        text = (f"Hi {BARISTA_NAME}, it's Spruik. {who} ordered a coffee {mins} minutes ago, "
+                f"and it hasn't been started. {spoken(o)}.")
+        if o.get("note"):
+            text += f" Their note says: {o['note']}."
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=150)) as s:
+            async with s.post(CALL_URL, json={"text": text[:400], "voice": CALL_VOICE}) as r:
+                result = r.status, (await r.text()).strip()
+        if result[0] == 409:
+            log.info("coffee nudge waiting: Spruik is on another call")
+            return  # not counted; tried again on the next check
+        o["nudges"] = o.get("nudges", 0) + 1
+        save_orders()
+        log.info("coffee nudge call %d: %s", o["nudges"], result[1])
+    except Exception as e:
+        o = orders.get(oid)
+        if o:
+            o["nudges"] = o.get("nudges", 0) + 1  # don't retry a broken call path in a loop
+            save_orders()
+        log.warning("coffee nudge call failed: %s", e)
+    finally:
+        calling.discard(oid)
 
 
 def status():
@@ -442,7 +504,8 @@ async def api_request(req):
         oid = secrets.token_urlsafe(12)
         now = time.time()
         entry = {**order, "who": who, "note": note, "phone": phone,
-                 "status": "waiting", "created": now, "updated": now}
+                 "status": "waiting", "created": now, "updated": now,
+                 "warmed": warmed is True, "nudges": 0}
 
         lines = [f"☕ Coffee request from {who}", describe(order)]
         if note:
