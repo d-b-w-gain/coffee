@@ -1,0 +1,67 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: coffee-data, namespace: home-automation }
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources: { requests: { storage: 10Mi } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: coffee
+  namespace: home-automation
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: coffee } }
+  template:
+    metadata: { labels: { app: coffee } }
+    spec:
+      containers:
+      - name: coffee
+        image: localhost/coffee:IMAGE_TAG
+        imagePullPolicy: Never
+        env:
+        - { name: TAPO_HOST, value: "192.168.88.10" }
+        - { name: DEFAULT_ON_MINUTES, value: "30" }
+        - { name: MAX_ON_MINUTES, value: "60" }
+        - name: TAPO_USERNAME
+          valueFrom: { secretKeyRef: { name: tapo-credentials, key: username, optional: true } }
+        - name: TAPO_PASSWORD
+          valueFrom: { secretKeyRef: { name: tapo-credentials, key: password, optional: true } }
+        - name: SIGNAL_ACCOUNT
+          valueFrom: { secretKeyRef: { name: coffee-signal, key: account, optional: true } }
+        - name: SIGNAL_RECIPIENT
+          valueFrom: { secretKeyRef: { name: coffee-signal, key: recipient, optional: true } }
+        - name: GIPHY_API_KEY
+          valueFrom: { secretKeyRef: { name: coffee-giphy, key: api-key, optional: true } }
+        ports: [{ containerPort: 8080 }]
+        volumeMounts: [{ name: data, mountPath: /data }]
+        readinessProbe: { httpGet: { path: /healthz, port: 8080 }, periodSeconds: 10 }
+        livenessProbe: { httpGet: { path: /healthz, port: 8080 }, periodSeconds: 20 }
+        resources:
+          requests: { cpu: 10m, memory: 48Mi }
+          limits: { memory: 128Mi }
+      securityContext: { fsGroup: 65534 }
+      volumes:
+      - name: data
+        persistentVolumeClaim: { claimName: coffee-data }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: coffee, namespace: home-automation }
+spec:
+  selector: { app: coffee }
+  ports: [{ port: 8080, targetPort: 8080 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: { name: coffee, namespace: home-automation }
+spec:
+  ingressClassName: traefik
+  rules:
+  - host: coffee.lan
+    http: { paths: [{ path: /, pathType: Prefix, backend: { service: { name: coffee, port: { number: 8080 } } } }] }
+  - host: coffee.192.168.88.29.nip.io
+    http: { paths: [{ path: /, pathType: Prefix, backend: { service: { name: coffee, port: { number: 8080 } } } }] }
