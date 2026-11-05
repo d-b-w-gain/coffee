@@ -173,18 +173,89 @@ GIPHY_KEY = os.environ.get("GIPHY_API_KEY", "")
 GIF_MAX_BYTES = 4_000_000
 BASE_URL = os.environ.get("BASE_URL", "http://coffee.lan").rstrip("/")
 ORDERS_FILE = os.environ.get("ORDERS_FILE", "/data/active-orders.json")
-ORDER_TTL_S = 6 * 3600  # an order not delivered within 6 h is forgotten
+ORDER_TTL_S = 6 * 3600  # an order not made within 6 h is forgotten
+RATE_WINDOW_S = 24 * 3600  # a made/delivered order stays this long so both sides can rate
 STATUSES = ("waiting", "made", "delivered")
 
-# Only orders still in progress are kept, keyed by an unguessable id. History
-# lives in each person's own browser, never here.
+# Only orders still in progress (or waiting to be rated) are kept, keyed by an
+# unguessable id. History lives in each person's own browser, never here.
 orders: dict[str, dict] = {}
 
 
+def finished(o):
+    """Delivered and rated both ways: nothing left to do."""
+    return o["status"] == "delivered" and o.get("rating") and o.get("review")
+
+
 def prune():
-    cutoff = time.time() - ORDER_TTL_S
-    for oid in [k for k, o in orders.items() if o["created"] < cutoff or o["status"] == "delivered"]:
+    now = time.time()
+    for oid in [k for k, o in orders.items()
+                if finished(o)
+                or o["created"] < now - RATE_WINDOW_S
+                or (o["status"] == "waiting" and o["created"] < now - ORDER_TTL_S)]:
         del orders[oid]
+
+
+# --- Ratings ("Coffee Detective" case file) ---------------------------------------
+# The drinker rates the coffee (1-5 beans, tags, optional comment); the barista
+# rates the customer with tags only. Only anonymous totals are kept.
+RATE_TAGS = ["Perfect crema", "Latte art 🎨", "Worth the wait", "Just right", "Smooth",
+             "Too hot 🔥", "Too weak", "Needs another shot", "Wrong cup?!"]
+REVIEW_TAGS = ["Said thanks 🙏", "Brought the mug back ☕", "Tipped in biscuits 🍪",
+               "Complicated order 😅", "Perfect timing ⏰", "Patient customer 🧘",
+               "Good chat 💬", "Customer of the day 🏆"]
+CASEFILE = os.environ.get("CASEFILE", "/data/casefile.json")
+casefile = {"rated": 0, "beans": [0, 0, 0, 0, 0], "by_drink": {}, "by_cup": {}, "tags": {},
+            "reviews": 0, "review_tags": {}, "streak": 0, "best_streak": 0}
+
+
+def load_casefile():
+    try:
+        with open(CASEFILE) as f:
+            casefile.update(json.load(f))
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        log.warning("couldn't load case file: %s", e)
+
+
+def save_casefile():
+    try:
+        tmp = CASEFILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(casefile, f)
+        os.replace(tmp, CASEFILE)
+    except Exception as e:
+        log.warning("couldn't save case file: %s", e)
+
+
+def tally(table, key, beans=None):
+    if beans is None:
+        table[key] = table.get(key, 0) + 1
+    else:
+        n, total = table.get(key, [0, 0])
+        table[key] = [n + 1, total + beans]
+
+
+def casefile_view():
+    c = casefile
+    rated = c["rated"]
+    avg = round(sum((i + 1) * n for i, n in enumerate(c["beans"])) / rated, 1) if rated else None
+
+    def best(table):
+        if not table:
+            return None
+        name, (n, total) = max(table.items(), key=lambda kv: (kv[1][1] / kv[1][0], kv[1][0]))
+        return {"name": name, "avg": round(total / n, 1), "count": n}
+
+    def top(table):
+        return max(table.items(), key=lambda kv: kv[1]) if table else None
+
+    return {"rated": rated, "average": avg, "beans": c["beans"],
+            "best_drink": best(c["by_drink"]), "best_cup": best(c["by_cup"]),
+            "top_tag": top(c["tags"]), "reviews": c["reviews"], "top_review_tag": top(c["review_tags"]),
+            "streak": c["streak"], "best_streak": c["best_streak"],
+            "rate_tags": RATE_TAGS, "review_tags": REVIEW_TAGS}
 
 
 def save_orders():
@@ -227,15 +298,16 @@ def describe(o):
 
 
 def public(o):
-    return {"status": o["status"], "who": o["who"], "summary": describe(o), "note": o["note"],
-            "created": int(o["created"]), "updated": int(o["updated"])}
+    return {"status": o["status"], "who": o["who"], "drink": o["drink"], "summary": describe(o),
+            "note": o["note"], "created": int(o["created"]), "updated": int(o["updated"]),
+            "rating": o.get("rating"), "review": o.get("review"), "has_phone": bool(o.get("phone"))}
 
 
-async def find_gif(session, drink):
-    """A random G-rated Giphy GIF for the drink, as a data: URI for signal-cli, or None."""
+async def find_gif(session, drink, query=None):
+    """A random G-rated Giphy GIF for the drink (or `query`), as a data: URI for signal-cli, or None."""
     if not GIPHY_KEY:
         return None
-    query = f"{drink.lower()} coffee"
+    query = query or f"{drink.lower()} coffee"
     for q in (query, "coffee"):
         try:
             async with session.get("https://api.giphy.com/v1/gifs/search", params={
@@ -795,12 +867,124 @@ async def api_order_set(req):
     if new == "made" and was == "waiting" and o.get("phone"):
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as s:
-                await signal_send(s, o["phone"], f"☕ Your {o['drink'].lower()} is ready!\n\n" + "\n".join(call_lines()))
+                await signal_send(s, o["phone"], f"☕ Your {o['drink'].lower()} is ready!\n\n"
+                                  + "\n".join(call_lines())
+                                  + f"\n\n🕵️ Once you've tried it, rate it for the case file: "
+                                  + f"{BASE_URL}/r/{req.match_info['oid']}")
         except Exception as e:
             log.warning("ready message failed: %s", e)
-    save_orders()  # a delivered order is dropped here
+    save_orders()  # kept for rating until both sides have rated (or 24 h)
     log.info("order marked %s", new)
     return web.json_response(result)
+
+
+async def api_order_rate(req):
+    """The drinker rates their coffee: 1-5 beans, up to 4 tags, an optional short comment."""
+    o = find_order(req)
+    if not o:
+        return web.json_response({"status": "gone"}, status=404)
+    if o["status"] == "waiting":
+        return web.json_response({"error": "It hasn't been made yet"}, status=409)
+    if o.get("rating"):
+        return web.json_response({"error": "Already rated", **public(o)}, status=409)
+    try:
+        body = await req.json()
+        beans = int(body.get("beans"))
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
+    if not 1 <= beans <= 5:
+        return web.json_response({"error": "pick 1 to 5 beans"}, status=400)
+    tags = [t for t in RATE_TAGS if t in (body.get("tags") or [])][:4]
+    comment = clean(body.get("comment"), 120)
+    o["rating"] = {"beans": beans, "tags": tags, "comment": comment, "at": int(time.time())}
+    result = public(o)
+    oid = req.match_info["oid"]
+    reviewed = bool(o.get("review"))
+    save_orders()  # dropped here if it's delivered and rated both ways
+
+    c = casefile
+    c["rated"] += 1
+    c["beans"][beans - 1] += 1
+    tally(c["by_drink"], o["drink"], beans)
+    if o.get("cup") and o["cup"] != "Dan's choice":
+        tally(c["by_cup"], o["cup"], beans)
+    for t in tags:
+        tally(c["tags"], t)
+    c["streak"] = c["streak"] + 1 if beans == 5 else 0
+    c["best_streak"] = max(c["best_streak"], c["streak"])
+    save_casefile()
+
+    if SIGNAL_ACCOUNT and SIGNAL_RECIPIENT:
+        who = "Someone" if o["who"] == "someone" else o["who"]
+        lines = [f"🕵️ Case report: {who} rated their {o['drink'].lower()}",
+                 "🫘" * beans + "·" * (5 - beans) + f"  {beans}/5"]
+        if tags:
+            lines.append(" · ".join(tags))
+        if comment:
+            lines.append(f"“{comment}”")
+        if c["streak"] >= 2:
+            lines.append(f"🔥 {c['streak']} five-bean coffees in a row!")
+        if not reviewed:
+            lines.append(f"Rate the customer back: {BASE_URL}/o/{oid}")
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as s:
+                await signal_send(s, SIGNAL_RECIPIENT, "\n".join(lines))
+        except Exception as e:
+            log.warning("rating message failed: %s", e)
+    log.info("order rated %d beans", beans)
+    return web.json_response(result)
+
+
+async def api_order_review(req):
+    """The barista rates the customer, tags only (no typing)."""
+    o = find_order(req)
+    if not o:
+        return web.json_response({"status": "gone"}, status=404)
+    if o["status"] == "waiting":
+        return web.json_response({"error": "Make it first"}, status=409)
+    if o.get("review"):
+        return web.json_response({"error": "Already reviewed", **public(o)}, status=409)
+    try:
+        body = await req.json()
+    except Exception:
+        return web.json_response({"error": "bad request"}, status=400)
+    tags = [t for t in REVIEW_TAGS if t in (body.get("tags") or [])][:4]
+    if not tags:
+        return web.json_response({"error": "pick at least one"}, status=400)
+    o["review"] = {"tags": tags, "at": int(time.time())}
+    oid = req.match_info["oid"]
+    sent = None
+    if o.get("phone"):
+        name = "" if o["who"] == "someone" else f", {o['who']}"
+        text = (f"🕵️ Case closed{name}! {BARISTA_NAME}'s review of you as a customer:\n"
+                + "\n".join(f"• {t}" for t in tags))
+        if not o.get("rating"):
+            text += f"\n\nYour turn: rate the coffee at {BASE_URL}/r/{oid}"
+        query = "cookies" if "Tipped in biscuits 🍪" in tags else (
+            "trophy" if "Customer of the day 🏆" in tags else "thank you")
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as s:
+                await signal_send(s, o["phone"], text, await find_gif(s, o["drink"], query))
+            sent = True
+        except Exception as e:
+            sent = False
+            log.warning("review message failed: %s", e)
+    result = public(o)
+    save_orders()  # dropped here if it's delivered and rated both ways
+    casefile["reviews"] += 1
+    for t in tags:
+        tally(casefile["review_tags"], t)
+    save_casefile()
+    log.info("customer reviewed (%d tags, sent=%s)", len(tags), sent)
+    return web.json_response({**result, "sent": sent})
+
+
+async def api_casefile(_):
+    return web.json_response(casefile_view())
+
+
+async def rate_page(_):
+    return web.FileResponse(os.path.join(os.path.dirname(__file__), "rate.html"))
 
 
 def menu_choice(body):
@@ -870,6 +1054,7 @@ async def index(_):
 async def start_bg(app):
     load_orders()
     load_stock()
+    load_casefile()
     load_schedule()
     load_history()
     app["wd"] = asyncio.create_task(watchdog(app))
@@ -884,8 +1069,12 @@ app.router.add_post("/api/off", api_off)
 app.router.add_get("/api/menu", api_menu)
 app.router.add_post("/api/request", api_request)
 app.router.add_get("/api/order/{oid}", api_order)
+app.router.add_post("/api/order/{oid}/rate", api_order_rate)
+app.router.add_post("/api/order/{oid}/review", api_order_review)
 app.router.add_post("/api/order/{oid}/{status}", api_order_set)
 app.router.add_get("/o/{oid}", order_page)
+app.router.add_get("/r/{oid}", rate_page)
+app.router.add_get("/api/casefile", api_casefile)
 app.router.add_get("/api/history", api_history)
 app.router.add_get("/api/schedule", api_schedule)
 app.router.add_post("/api/schedule", api_schedule_set)

@@ -23,6 +23,16 @@
   button:disabled { opacity:.45; cursor:default; }
   .made { background:var(--brew); } .done { background:var(--on); }
   .muted { color:var(--muted); font-size:14px; }
+  .box { margin-top:18px; padding:14px; border-radius:12px; background:#efe6db; text-align:left; }
+  @media (prefers-color-scheme: dark) { .box, .chip { background:#352c26; } }
+  .box b { display:block; margin-bottom:6px; }
+  .beans { font-size:24px; }
+  .chips { display:flex; flex-wrap:wrap; gap:8px; margin:10px 0 4px; }
+  .chip { flex:none; font:inherit; font-size:14px; font-weight:500; padding:8px 12px; border-radius:999px;
+          background:#fff; color:inherit; border:1px solid #0002; }
+  .chip.on { background:var(--brew); color:#fff; }
+  .send { width:100%; background:var(--on); margin-top:10px; }
+  .err { color:#a23b2a; font-size:14px; min-height:1.2em; margin-top:6px; }
 </style>
 </head>
 <body>
@@ -33,30 +43,88 @@
 <script>
 const id = location.pathname.split('/').pop();
 const LABEL = { waiting: 'Waiting to be made', made: 'Made, ready to take over', delivered: 'Delivered ✓' };
+let reviewTags = [], picked = new Set(), last = null, timer = null;
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text) e.textContent = text; return e; };
 
 function render(o) {
   const b = document.getElementById('body'); b.textContent = '';
   if (!o || o.status === 'gone') {
-    b.append(el('p', 'muted', 'This order is finished, or more than 6 hours old, so it’s been cleared.'));
+    b.append(el('p', 'muted', 'This order is finished and rated, or too old, so it’s been cleared.'));
     return;
   }
   b.append(el('div', 'who', 'for ' + o.who), el('div', 'summary', o.summary), el('div', 'note', o.note || ''),
            el('div', 'status', LABEL[o.status] || o.status));
-  if (o.status === 'delivered') { b.append(el('p', 'muted', 'Order cleared.')); return; }
-  const row = el('div', 'row');
-  const made = el('button', 'made', 'Made'); made.disabled = o.status !== 'waiting'; made.onclick = () => set('made');
-  const done = el('button', 'done', 'Delivered'); done.onclick = () => set('delivered');
-  row.append(made, done); b.append(row);
+  if (o.status !== 'delivered') {
+    const row = el('div', 'row');
+    const made = el('button', 'made', 'Made'); made.disabled = o.status !== 'waiting'; made.onclick = () => set('made');
+    const done = el('button', 'done', 'Delivered'); done.onclick = () => set('delivered');
+    row.append(made, done); b.append(row);
+  }
+  if (o.status === 'waiting') return;
+
+  // Their rating of the coffee
+  const theirs = el('div', 'box');
+  if (o.rating) {
+    theirs.append(el('b', '', '🕵️ ' + o.who + '’s verdict'), el('div', 'beans', '🫘'.repeat(o.rating.beans) + '  ' + o.rating.beans + '/5'));
+    if (o.rating.tags.length) theirs.append(el('div', '', o.rating.tags.join(' · ')));
+    if (o.rating.comment) theirs.append(el('div', 'muted', '“' + o.rating.comment + '”'));
+  } else theirs.append(el('b', '', '🕵️ Their verdict'), el('div', 'muted', 'Not rated yet. It’ll appear here.'));
+  b.append(theirs);
+
+  // Your review of them: tap only
+  const mine = el('div', 'box');
+  if (o.review) {
+    mine.append(el('b', '', 'Your review of ' + o.who), ...o.review.tags.map(t => el('div', '', '• ' + t)));
+  } else {
+    mine.append(el('b', '', 'Rate the customer'),
+                el('div', 'muted', 'Tap up to four' + (o.has_phone ? '. They’ll get it on Signal.' : '. It shows on their coffee.lan.')));
+    const chips = el('div', 'chips');
+    const send = el('button', 'send', 'Send review'), err = el('div', 'err');
+    send.disabled = !picked.size;
+    for (const t of reviewTags) {
+      const c = el('button', 'chip' + (picked.has(t) ? ' on' : ''), t);
+      c.onclick = () => {
+        if (picked.has(t)) picked.delete(t); else if (picked.size < 4) picked.add(t);
+        c.classList.toggle('on', picked.has(t)); send.disabled = !picked.size;
+      };
+      chips.append(c);
+    }
+    send.onclick = async () => {
+      send.disabled = true;
+      try {
+        const r = await fetch(`/api/order/${id}/review`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                                           body: JSON.stringify({ tags: [...picked] }) });
+        const j = await r.json();
+        if (r.ok || r.status === 409) { if (j.status) last = j; render(j.status ? j : null); }
+        else { err.textContent = j.error || 'Couldn’t send'; send.disabled = false; }
+      } catch { err.textContent = 'Couldn’t reach the coffee machine'; send.disabled = false; }
+    };
+    mine.append(chips, send, err);
+  }
+  b.append(mine);
+  if (!o.rating && !timer) timer = setInterval(load, 10000);
 }
 async function load() {
-  try { const r = await fetch('/api/order/' + id); render(r.ok ? await r.json() : null); } catch {}
+  try {
+    const r = await fetch('/api/order/' + id);
+    if (r.ok) {
+      const o = await r.json();
+      // Don't redraw (and lose taps) unless something changed.
+      if (!last || JSON.stringify([o.status, o.rating, o.review]) !== JSON.stringify([last.status, last.rating, last.review])) render(o);
+      last = o;
+      if (o.rating && timer) { clearInterval(timer); timer = null; }
+    } else if (last) { clearInterval(timer); timer = null; }  // cleared once rated both ways; keep showing it
+    else render(null);
+  } catch {}
 }
 async function set(s) {
   const r = await fetch(`/api/order/${id}/${s}`, { method: 'POST' });
-  render(r.ok ? await r.json() : null);
+  if (r.ok) { last = await r.json(); render(last); } else render(null);
 }
-load();
+(async () => {
+  try { reviewTags = (await (await fetch('/api/casefile')).json()).review_tags; } catch {}
+  load();
+})();
 </script>
 </body>
 </html>

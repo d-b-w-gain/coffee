@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Rate your coffee</title>
+<style>
+  :root { --bg:#f6f1ea; --fg:#2b211b; --muted:#7a6a5e; --on:#2f7d4f; --brew:#8a5a2b; --card:#fff; --chip:#efe6db; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#1b1613; --fg:#f1e7dd; --muted:#a8968a; --card:#26201c; --brew:#b07a45; --chip:#352c26; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.4 system-ui, sans-serif;
+         min-height:100vh; display:grid; place-items:center; padding:16px; }
+  main { background:var(--card); padding:24px 20px; border-radius:16px; width:min(400px, 100%);
+         box-shadow:0 4px 20px #0002; text-align:center; }
+  h1 { margin:0; font-size:20px; }
+  .muted { color:var(--muted); font-size:14px; }
+  .summary { font-size:18px; font-weight:600; margin:12px 0 4px; }
+  .beans { display:flex; justify-content:center; gap:6px; margin:18px 0 4px; }
+  .beans button { font-size:34px; line-height:1; background:none; border:0; padding:4px; cursor:pointer;
+                  filter:grayscale(1) opacity(.35); transition:transform .12s, filter .12s; }
+  .beans button.lit { filter:none; }
+  .beans button:hover { transform:scale(1.15) rotate(-8deg); }
+  .verdict { min-height:1.4em; font-weight:600; color:var(--brew); }
+  .chips { display:flex; flex-wrap:wrap; gap:8px; justify-content:center; margin:16px 0 4px; }
+  .chip { font:inherit; font-size:14px; padding:7px 12px; border-radius:999px; border:1px solid transparent;
+          background:var(--chip); color:inherit; cursor:pointer; }
+  .chip.on { background:var(--brew); color:#fff; }
+  input { font:inherit; width:100%; padding:11px 12px; border-radius:10px; border:1px solid var(--muted);
+          background:transparent; color:inherit; margin-top:12px; }
+  .send { width:100%; font:inherit; font-weight:600; padding:14px 0; border:0; border-radius:10px; cursor:pointer;
+          color:#fff; background:var(--on); margin-top:16px; }
+  .send:disabled { opacity:.45; cursor:default; }
+  .err { color:#a23b2a; min-height:1.3em; font-size:14px; margin-top:8px; }
+  .done { font-size:30px; margin:14px 0 2px; }
+  .review { margin-top:18px; padding:14px; border-radius:12px; background:var(--chip); text-align:left; }
+  .review b { display:block; margin-bottom:6px; }
+  a { color:var(--brew); }
+</style>
+</head>
+<body>
+<main>
+  <h1>🕵️ Rate your coffee</h1>
+  <div id="body"><p class="muted">Loading…</p></div>
+</main>
+<script>
+const id = location.pathname.split('/').pop();
+const VERDICT = ['', 'Case unsolved…', 'A few clues missing', 'Solid alibi', 'Excellent work, detective', 'Case closed: perfect! ✨'];
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text) e.textContent = text; return e; };
+let tagsList = [], beans = 0, picked = new Set(), timer = null;
+
+function reviewBox(o) {
+  if (!o.review) return el('p', 'muted', 'Dan may leave you a customer review too. It’ll show up here.');
+  const box = el('div', 'review');
+  box.append(el('b', '', '🕵️ Dan’s review of you'), ...o.review.tags.map(t => el('div', '', '• ' + t)));
+  return box;
+}
+
+function render(o) {
+  const b = document.getElementById('body'); b.textContent = '';
+  if (!o || o.status === 'gone') {
+    b.append(el('p', 'muted', 'This case is closed: the order was rated already, or is more than a day old.'),
+             Object.assign(el('a', '', 'Back to coffee.lan'), { href: '/' }));
+    return;
+  }
+  b.append(el('div', 'muted', 'for ' + o.who), el('div', 'summary', o.summary));
+  if (o.status === 'waiting') {
+    b.append(el('p', 'muted', 'It hasn’t been made yet. Come back once you’ve tried it!'));
+    return;
+  }
+  if (o.rating) {
+    b.append(el('div', 'done', '🫘'.repeat(o.rating.beans)), el('div', 'verdict', VERDICT[o.rating.beans]));
+    if (o.rating.tags.length) b.append(el('div', 'muted', o.rating.tags.join(' · ')));
+    if (o.rating.comment) b.append(el('div', 'muted', '“' + o.rating.comment + '”'));
+    b.append(reviewBox(o));
+    if (!o.review && !timer) timer = setInterval(load, 10000);
+    if (o.review && timer) { clearInterval(timer); timer = null; }
+    return;
+  }
+
+  const row = el('div', 'beans'), verdict = el('div', 'verdict', 'Tap the beans');
+  const paint = () => [...row.children].forEach((x, i) => x.classList.toggle('lit', i < beans));
+  for (let i = 1; i <= 5; i++) {
+    const bt = el('button', '', '🫘'); bt.type = 'button'; bt.setAttribute('aria-label', i + ' bean' + (i > 1 ? 's' : ''));
+    bt.onclick = () => { beans = i; paint(); verdict.textContent = VERDICT[i]; send.disabled = false; };
+    row.append(bt);
+  }
+  const chips = el('div', 'chips');
+  for (const t of tagsList) {
+    const c = el('button', 'chip' + (picked.has(t) ? ' on' : ''), t); c.type = 'button';
+    c.onclick = () => {
+      if (picked.has(t)) picked.delete(t); else if (picked.size < 4) picked.add(t);
+      c.classList.toggle('on', picked.has(t));
+    };
+    chips.append(c);
+  }
+  const comment = el('input'); comment.maxLength = 120; comment.placeholder = 'Anything else? (optional)';
+  const send = el('button', 'send', 'Send to Dan'); send.disabled = !beans;
+  const err = el('div', 'err');
+  send.onclick = async () => {
+    send.disabled = true; err.textContent = '';
+    try {
+      const r = await fetch(`/api/order/${id}/rate`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ beans, tags: [...picked], comment: comment.value.trim() }) });
+      const j = await r.json();
+      if (r.ok || r.status === 409) { if (j.status) last = j; render(j.status ? j : null); }
+      else { err.textContent = j.error || 'Couldn’t send'; send.disabled = false; }
+    } catch { err.textContent = 'Couldn’t reach the coffee machine'; send.disabled = false; }
+  };
+  b.append(row, verdict, el('div', 'muted', 'Pick up to four'), chips, comment, send, err);
+  paint();
+}
+
+let last = null;
+async function load() {
+  try {
+    const r = await fetch('/api/order/' + id);
+    if (r.ok) { last = await r.json(); render(last); }
+    else if (last) { clearInterval(timer); timer = null; }  // cleared once both sides rated; keep showing it
+    else render(null);
+  } catch {}
+}
+(async () => {
+  try { tagsList = (await (await fetch('/api/casefile')).json()).rate_tags; } catch {}
+  load();
+})();
+</script>
+</body>
+</html>

@@ -96,8 +96,18 @@
   .past b { font-weight:600; }
   .past.picked { border-color:var(--brew); box-shadow:0 0 0 1px var(--brew) inset; }
   .track { border:1px solid var(--line); border-radius:10px; padding:9px 12px; font-size:14px;
-           display:flex; justify-content:space-between; gap:8px; }
+           display:flex; flex-wrap:wrap; justify-content:space-between; gap:8px; }
   .track .st { font-weight:600; white-space:nowrap; }
+  .track .rate { color:var(--brew); font-weight:600; text-decoration:none; white-space:nowrap; }
+  .track .rev { flex-basis:100%; color:var(--muted); font-size:13px; }
+  .case { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:12px; }
+  .case > div { border:1px solid var(--line); border-radius:12px; padding:10px 12px; }
+  .case > div > b { display:block; font-size:20px; }
+  .case > div > span { color:var(--muted); font-size:13px; }
+  .case .wide { grid-column:1 / -1; }
+  .hist { display:flex; flex-direction:column; gap:3px; margin-top:6px; }
+  .hist i { display:flex; align-items:center; gap:6px; font-style:normal; font-size:12px; color:var(--muted); }
+  .hist em { display:block; height:8px; border-radius:4px; background:var(--brew); min-width:2px; }
   .track.made .st { color:var(--on); }
 
   .item { border:1px solid var(--line); border-radius:12px; padding:10px 12px; }
@@ -394,6 +404,12 @@
 </section>
 
 <section>
+  <h2>🕵️ Case file</h2>
+  <div class="muted center">How Dan’s coffees rate. Totals only: no names are kept.</div>
+  <div class="case" id="case"><div class="wide"><span>No coffees rated yet. Rate yours from “Your orders” once it’s made.</span></div></div>
+</section>
+
+<section>
   <h2>Stock</h2>
   <div class="muted center" id="stockhint">Goes down each time Dan marks a coffee made.</div>
   <div id="stock" style="margin-top:12px"></div>
@@ -684,7 +700,7 @@ function rememberLocal(o) {
 
 const ST = { waiting: 'Waiting', made: 'Ready ☕', delivered: 'Delivered' };
 async function trackMine() {
-  const cutoff = Date.now() - 6 * 3600e3;
+  const cutoff = Date.now() - 24 * 3600e3;  // made orders stay a day so they can be rated
   const box = $('mine'), keep = [], rows = [];
   for (const m of store.get('coffee-mine', []).filter(m => m.at > cutoff)) {
     let o = null;
@@ -695,7 +711,18 @@ async function trackMine() {
     const row = document.createElement('div'); row.className = 'track ' + o.status;
     const s = document.createElement('span'); s.textContent = o.summary || m.summary;
     const st = document.createElement('span'); st.className = 'st'; st.textContent = ST[o.status] || '…';
-    row.append(s, st); rows.push(row);
+    row.append(s, st);
+    if (o.status === 'made' || o.status === 'delivered') {
+      const a = document.createElement('a'); a.className = 'rate'; a.href = 'r/' + m.id;
+      a.textContent = o.rating ? '🫘'.repeat(o.rating.beans) : 'Rate it 🫘';
+      row.append(a);
+    }
+    if (o.review) {
+      const r = document.createElement('div'); r.className = 'rev';
+      r.textContent = '🕵️ Dan’s review of you: ' + o.review.tags.join(' · ');
+      row.append(r);
+    }
+    rows.push(row);
   }
   box.replaceChildren(...rows);
   store.set('coffee-mine', keep);
@@ -795,7 +822,41 @@ async function logCoffee() {
 $('m-switch').addEventListener('click', toggle);
 $('m-switch').addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
 initMenu().then(loadRecent);
-trackMine(); poll(); loadStock(); loadSchedule(); loadHistory();
+// ---- case file ----------------------------------------------------------
+function renderCase(c) {
+  if (!c.rated && !c.reviews) return;
+  const tile = (big, small, cls) => {
+    const d = document.createElement('div'); if (cls) d.className = cls;
+    const b = document.createElement('b'); b.textContent = big;
+    const sp = document.createElement('span'); sp.textContent = small;
+    d.append(b, sp); return d;
+  };
+  const tiles = [];
+  if (c.rated) {
+    tiles.push(tile(c.average + ' 🫘', `average from ${c.rated} coffee${c.rated === 1 ? '' : 's'}`));
+    tiles.push(tile(c.streak + ' 🔥', `five-bean streak (best ${c.best_streak})`));
+    if (c.best_drink) tiles.push(tile(c.best_drink.name, `top drink · ${c.best_drink.avg} beans`));
+    if (c.best_cup) tiles.push(tile(c.best_cup.name, `luckiest cup · ${c.best_cup.avg} beans`));
+    if (c.top_tag) tiles.push(tile(c.top_tag[0], `most-said about the coffee (${c.top_tag[1]}×)`, 'wide'));
+    const hist = tile('', 'beans given', 'wide'); hist.firstChild.remove();
+    const h = document.createElement('div'); h.className = 'hist';
+    const most = Math.max(...c.beans, 1);
+    for (let i = 4; i >= 0; i--) {
+      const row = document.createElement('i'); const bar = document.createElement('em');
+      bar.style.width = (c.beans[i] / most * 70) + '%';
+      const label = document.createElement('span'); label.textContent = (i + 1) + ' 🫘'; label.style.minWidth = '3em';
+      row.append(label, bar, String(c.beans[i]));
+      h.append(row);
+    }
+    hist.prepend(h); tiles.push(hist);
+  }
+  if (c.top_review_tag) tiles.push(tile(c.top_review_tag[0], `Dan’s most-given customer badge (${c.top_review_tag[1]}×)`, 'wide'));
+  $('case').replaceChildren(...tiles);
+}
+async function loadCase() { try { renderCase(await (await fetch('api/casefile')).json()); } catch {} }
+
+trackMine(); poll(); loadStock(); loadSchedule(); loadHistory(); loadCase();
+setInterval(loadCase, 60000);
 setInterval(loadHistory, 60000);
 setInterval(poll, 5000); setInterval(trackMine, 15000); setInterval(loadStock, 30000);
 </script>
