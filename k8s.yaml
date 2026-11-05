@@ -26,6 +26,7 @@ spec:
         - { name: TAPO_HOST, value: "192.168.88.10" }
         - { name: DEFAULT_ON_MINUTES, value: "30" }
         - { name: MAX_ON_MINUTES, value: "60" }
+        - { name: TZ, value: "Australia/Sydney" }
         - name: TAPO_USERNAME
           valueFrom: { secretKeyRef: { name: tapo-credentials, key: username, optional: true } }
         - name: TAPO_PASSWORD

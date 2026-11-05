@@ -3,6 +3,12 @@
 Every "on" comes with an auto-off timer (default 30 min, max MAX_ON_MINUTES),
 and if the plug is found on with no timer running (pod restart, someone pressed
 the button) it gets switched off after MAX_ON_MINUTES as well.
+
+The weekly schedule (/data/schedule.json, local time in TZ) is the one place the
+machine is switched on and off on a timetable: at a window's start the machine is
+switched on until the window's end. Inside a window, timers only ever get longer
+(a warm-up or "on" never cuts the window short); pressing Off still wins until
+the next window. The Tapo app's own schedules should stay disabled.
 """
 import asyncio
 import base64
@@ -13,6 +19,8 @@ import random
 import re
 import secrets
 import time
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import aiohttp
 from aiohttp import web
@@ -25,6 +33,14 @@ PASS = os.environ.get("TAPO_PASSWORD", "")
 DEFAULT_MIN = int(os.environ.get("DEFAULT_ON_MINUTES", "30"))
 MAX_MIN = int(os.environ.get("MAX_ON_MINUTES", "60"))
 POLL_S = 30
+
+TZ = ZoneInfo(os.environ.get("TZ") or "Australia/Sydney")
+SCHEDULE_FILE = os.environ.get("SCHEDULE_FILE", "/data/schedule.json")
+MAX_WINDOW_MIN = int(os.environ.get("MAX_SCHEDULE_MINUTES", "720"))
+START_GRACE_S = 15 * 60  # if the plug can't be reached at the start, keep trying this long
+DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+# Seeded from the Tapo app rules that were in use (on 05:45, off 11:00, every day).
+DEFAULT_SCHEDULE = {"enabled": True, "rules": [{"days": list(range(7)), "on": "05:45", "off": "11:00"}]}
 
 SIGNAL_API = os.environ.get("SIGNAL_API_URL", "http://signal-cli.cnc-controller.svc:8080")
 SIGNAL_ACCOUNT = os.environ.get("SIGNAL_ACCOUNT", "")
@@ -240,6 +256,108 @@ async def find_gif(session, drink):
 log = logging.getLogger("coffee")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
+# --- Schedule ------------------------------------------------------------------
+schedule = {"enabled": True, "rules": [], "started": None}  # started = key of the last window switched on
+
+
+def hm(text):
+    m = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", str(text).strip())
+    if not m:
+        raise ValueError(f"time must be HH:MM, got {text!r}")
+    return int(m[1]) * 60 + int(m[2])
+
+
+def clean_rules(rules):
+    if not isinstance(rules, list) or len(rules) > 8:
+        raise ValueError("up to 8 schedule rows")
+    out = []
+    for r in rules:
+        days = sorted({int(d) for d in r.get("days", [])})
+        if not days or any(d < 0 or d > 6 for d in days):
+            raise ValueError("pick at least one day")
+        on, off = hm(r.get("on")), hm(r.get("off"))
+        if off <= on:
+            raise ValueError("the off time must be later the same day than the on time")
+        if off - on > MAX_WINDOW_MIN:
+            raise ValueError(f"a window can be at most {MAX_WINDOW_MIN // 60} hours")
+        out.append({"days": days, "on": f"{on // 60:02d}:{on % 60:02d}", "off": f"{off // 60:02d}:{off % 60:02d}"})
+    return out
+
+
+def load_schedule():
+    try:
+        with open(SCHEDULE_FILE) as f:
+            data = json.load(f)
+        schedule.update(enabled=bool(data.get("enabled", True)), rules=clean_rules(data.get("rules", [])),
+                        started=data.get("started"))
+    except FileNotFoundError:
+        schedule.update(enabled=DEFAULT_SCHEDULE["enabled"], rules=clean_rules(DEFAULT_SCHEDULE["rules"]))
+        win = current_window()
+        schedule["started"] = win[2] if win else None  # don't switch on just because we started up
+        save_schedule()
+    except Exception as e:
+        log.warning("schedule unreadable, using none: %s", e)
+        schedule.update(enabled=False, rules=[])
+
+
+def save_schedule():
+    os.makedirs(os.path.dirname(SCHEDULE_FILE), exist_ok=True)
+    tmp = SCHEDULE_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(schedule, f, indent=1)
+    os.replace(tmp, SCHEDULE_FILE)
+
+
+def windows_on(day):
+    """(start_ts, end_ts, key) for each scheduled window on a local date."""
+    if not schedule["enabled"]:
+        return []
+    out = []
+    for i, r in enumerate(schedule["rules"]):
+        if day.weekday() not in r["days"]:
+            continue
+        midnight = datetime(day.year, day.month, day.day, tzinfo=TZ)
+        on, off = hm(r["on"]), hm(r["off"])
+        out.append(((midnight + timedelta(minutes=on)).timestamp(),
+                    (midnight + timedelta(minutes=off)).timestamp(), f"{day.isoformat()}#{i}"))
+    return sorted(out)
+
+
+def current_window(now=None):
+    now = now or time.time()
+    hits = [w for w in windows_on(datetime.fromtimestamp(now, TZ).date()) if w[0] <= now < w[1]]
+    return max(hits, key=lambda w: w[1]) if hits else None
+
+
+def next_window(now=None):
+    now = now or time.time()
+    today = datetime.fromtimestamp(now, TZ).date()
+    for d in range(8):
+        for w in windows_on(today + timedelta(days=d)):
+            if w[0] > now:
+                return w
+    return None
+
+
+def when(ts):
+    t = datetime.fromtimestamp(ts, TZ)
+    days = (t.date() - datetime.fromtimestamp(time.time(), TZ).date()).days
+    day = "today" if days == 0 else "tomorrow" if days == 1 else DAY_NAMES[t.weekday()]
+    return f"{day} {t:%H:%M}"
+
+
+def off_time(minutes):
+    """Auto-off time for an 'on': never earlier than the scheduled window's end, or a timer already running."""
+    now = time.time()
+    until = now + minutes * 60
+    win = current_window(now)
+    if win:
+        until = max(until, win[1])
+    if state["is_on"] and state["off_at"]:
+        until = max(until, state["off_at"])
+    return until
+
+
 state = {"dev": None, "off_at": None, "error": None, "is_on": None, "on_since": None}
 WARMUP_MIN = int(os.environ.get("WARMUP_MINUTES", "20"))  # Minibar, 2 L boiler, 1500 W
 lock = asyncio.Lock()
@@ -286,26 +404,42 @@ async def refresh():
 async def switch(on: bool, minutes: int | None = None):
     async with lock:
         dev = await device()
+        was_on = state["is_on"]
         await (dev.turn_on() if on else dev.turn_off())
         await dev.update()
-        was_on = state["is_on"]
         state["is_on"], state["error"] = dev.is_on, None
-        state["off_at"] = time.time() + minutes * 60 if on else None
+        state["off_at"] = off_time(minutes) if on else None
         if not on:
             state["on_since"] = None
         elif not was_on:
             since = getattr(dev, "on_since", None)
             state["on_since"] = since.timestamp() if since else time.time()
-        log.info("turned %s%s", "on" if on else "off", f" for {minutes} min" if on else "")
+        log.info("turned %s%s", "on" if on else "off",
+                 f" until {datetime.fromtimestamp(state['off_at'], TZ):%H:%M}" if on else "")
 
 
 async def watchdog(app):
     while True:
         await refresh()
         now = time.time()
+        win = current_window(now)
+        if win and schedule["started"] != win[2] and now - win[0] < START_GRACE_S and state["is_on"] is not None:
+            try:  # a scheduled window just began
+                if state["is_on"]:
+                    state["off_at"] = off_time(0)
+                else:
+                    await switch(True, 0)
+                schedule["started"] = win[2]
+                save_schedule()
+                log.info("schedule: on until %s", datetime.fromtimestamp(win[1], TZ).strftime("%H:%M"))
+            except Exception as e:
+                log.warning("scheduled on failed: %s", e)
         if state["is_on"] and state["off_at"] is None:
-            state["off_at"] = now + MAX_MIN * 60  # found on without a timer
-            log.info("plug was on with no timer; auto-off in %d min", MAX_MIN)
+            state["off_at"] = win[1] if win else now + MAX_MIN * 60  # found on without a timer
+            log.info("plug was on with no timer; auto-off at %s",
+                     datetime.fromtimestamp(state["off_at"], TZ).strftime("%H:%M"))
+        elif state["is_on"] and win and state["off_at"] < win[1]:
+            state["off_at"] = win[1]  # on during a window: stay on until it ends
         elif state["is_on"] is False:
             state["off_at"] = None
         if state["is_on"] and state["off_at"] and now >= state["off_at"]:
@@ -381,9 +515,39 @@ def status():
     warm_left = None
     if state["is_on"] and state["on_since"]:
         warm_left = max(0, int(WARMUP_MIN * 60 - (time.time() - state["on_since"])))
+    win, nxt = current_window(), next_window()
     return {"on": state["is_on"], "seconds_left": left, "error": state["error"],
             "warm_seconds_left": warm_left, "warmup_minutes": WARMUP_MIN,
-            "default_minutes": DEFAULT_MIN, "max_minutes": MAX_MIN}
+            "default_minutes": DEFAULT_MIN, "max_minutes": MAX_MIN,
+            "scheduled_until": datetime.fromtimestamp(win[1], TZ).strftime("%H:%M") if win else None,
+            "next_scheduled": when(nxt[0]) if nxt else None}
+
+
+def schedule_view():
+    nxt = next_window()
+    return {"enabled": schedule["enabled"], "rules": schedule["rules"], "days": DAY_NAMES,
+            "timezone": str(TZ), "max_hours": MAX_WINDOW_MIN // 60,
+            "next": when(nxt[0]) if nxt else None}
+
+
+async def api_schedule(_):
+    return web.json_response(schedule_view())
+
+
+async def api_schedule_set(req):
+    try:
+        body = await req.json()
+        rules = clean_rules(body.get("rules", []))
+    except (ValueError, TypeError, AttributeError, json.JSONDecodeError) as e:
+        return web.json_response({"error": str(e) or "bad schedule"}, status=400)
+    schedule.update(enabled=bool(body.get("enabled", True)), rules=rules)
+    win = current_window()
+    schedule["started"] = win[2] if win else None  # a new schedule never switches on mid-window
+    if win and state["is_on"] and state["off_at"] and state["off_at"] < win[1]:
+        state["off_at"] = win[1]
+    save_schedule()
+    log.info("schedule saved: %s", json.dumps(schedule))
+    return web.json_response(schedule_view())
 
 
 async def api_status(_):
@@ -649,6 +813,7 @@ async def index(_):
 async def start_bg(app):
     load_orders()
     load_stock()
+    load_schedule()
     app["wd"] = asyncio.create_task(watchdog(app))
 
 
@@ -663,6 +828,8 @@ app.router.add_post("/api/request", api_request)
 app.router.add_get("/api/order/{oid}", api_order)
 app.router.add_post("/api/order/{oid}/{status}", api_order_set)
 app.router.add_get("/o/{oid}", order_page)
+app.router.add_get("/api/schedule", api_schedule)
+app.router.add_post("/api/schedule", api_schedule_set)
 app.router.add_get("/api/stock", api_stock)
 app.router.add_post("/api/stock/log", api_stock_log)
 app.router.add_post("/api/stock/{item}", api_stock_change)

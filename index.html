@@ -112,6 +112,19 @@
   .item .acts { display:flex; gap:6px; }
   .small { flex:1; font-size:13px; padding:7px 0; border-radius:8px; border:1px solid var(--line);
            background:transparent; color:var(--fg); }
+
+  details.sched { margin:0 20px 12px; font-size:14px; }
+  details.sched summary { cursor:pointer; color:var(--muted); }
+  .srow { border:1px solid var(--line); border-radius:12px; padding:10px; margin-top:10px; }
+  .days { display:flex; gap:4px; }
+  .days button { flex:1; padding:7px 0; font-size:12px; border-radius:8px; border:1px solid var(--line);
+                 background:transparent; color:var(--fg); }
+  .days button[aria-pressed=true] { background:var(--brew); border-color:var(--brew); color:#fff; }
+  .times { display:flex; align-items:center; gap:8px; margin-top:8px; }
+  .times input { font:inherit; padding:8px; border-radius:8px; border:1px solid var(--line);
+                 background:transparent; color:var(--fg); min-width:0; flex:1; }
+  .times .x { flex:none; width:36px; padding:7px 0; border-radius:8px; border:1px solid var(--line);
+              background:transparent; color:var(--muted); }
 </style>
 </head>
 <body>
@@ -304,6 +317,17 @@
     </button>
   </div>
   <div class="err machine-err" id="err"></div>
+  <details class="sched" id="sched">
+    <summary>Machine schedule · <span id="sched-sum">…</span></summary>
+    <label class="check"><input type="checkbox" id="sched-on"> Switch on and off automatically</label>
+    <div id="sched-rows"></div>
+    <div class="row">
+      <button class="small" type="button" onclick="addRule()">+ Add a time</button>
+      <button class="small" type="button" onclick="saveSchedule()" style="font-weight:600">Save schedule</button>
+    </div>
+    <div class="muted" style="margin-top:8px">Times are <span id="sched-tz">Sydney</span> time. While a scheduled time is running, ordering or pressing On never cuts it short; pressing Off turns it off until the next one. This replaces the Tapo app’s schedule, so keep that turned off.</div>
+    <div class="err" id="sched-msg"></div>
+  </details>
   <details class="about">
     <summary>About the machine</summary>
     <dl>
@@ -500,7 +524,10 @@ function show(s) {
   const progress = s.on ? 1 - Math.min(1, (s.warm_seconds_left ?? 0) / total) : 0;
   $('m-needle').setAttribute('transform', `rotate(${-130 + progress * 175})`);
   $('badge').textContent = s.on === null ? 'offline' : s.on ? 'ON' : 'OFF';
-  $('left').textContent = s.on && s.seconds_left != null ? `turns off in ${Math.ceil(s.seconds_left / 60)} min` : '';
+  $('left').textContent = s.on && s.scheduled_until && s.seconds_left != null
+      ? `on until ${s.scheduled_until} (schedule)`
+    : s.on && s.seconds_left != null ? `turns off in ${Math.ceil(s.seconds_left / 60)} min`
+    : !s.on && s.next_scheduled ? `scheduled on ${s.next_scheduled}` : '';
   $('err').textContent = s.error || '';
 }
 async function poll() { try { show(await (await fetch('api/status')).json()); } catch {} }
@@ -509,6 +536,56 @@ async function toggle() {
   const q = isOn ? 'off' : 'on?minutes=' + $('mins').value;
   $('rocker').disabled = true;
   try { show(await (await fetch('api/' + q, { method: 'POST' })).json()); } catch { $('err').textContent = 'Couldn’t reach the server.'; }
+}
+
+// ---- schedule -----------------------------------------------------------
+let sched = { enabled: true, rules: [], days: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] };
+function schedSummary(v) {
+  if (!v.enabled || !v.rules.length) return 'off';
+  return v.rules.map(r => `${r.days.length === 7 ? 'every day' : r.days.map(d => v.days[d]).join(' ')} ${r.on}–${r.off}`).join(', ');
+}
+function renderSchedule() {
+  $('sched-on').checked = sched.enabled;
+  $('sched-rows').replaceChildren(...sched.rules.map((r, i) => {
+    const row = document.createElement('div'); row.className = 'srow';
+    const days = document.createElement('div'); days.className = 'days';
+    sched.days.forEach((name, d) => {
+      const b = document.createElement('button'); b.type = 'button'; b.textContent = name;
+      b.setAttribute('aria-pressed', String(r.days.includes(d)));
+      b.onclick = () => { r.days = r.days.includes(d) ? r.days.filter(x => x !== d) : [...r.days, d].sort(); renderSchedule(); };
+      days.append(b);
+    });
+    const times = document.createElement('div'); times.className = 'times';
+    const on = document.createElement('input'); on.type = 'time'; on.value = r.on; on.setAttribute('aria-label', 'On at');
+    on.onchange = () => { r.on = on.value; };
+    const off = document.createElement('input'); off.type = 'time'; off.value = r.off; off.setAttribute('aria-label', 'Off at');
+    off.onchange = () => { r.off = off.value; };
+    const to = document.createElement('span'); to.className = 'muted'; to.textContent = 'to';
+    const x = document.createElement('button'); x.type = 'button'; x.className = 'x'; x.textContent = '✕';
+    x.setAttribute('aria-label', 'Remove this time');
+    x.onclick = () => { sched.rules.splice(i, 1); renderSchedule(); };
+    times.append(on, to, off, x);
+    row.append(days, times);
+    return row;
+  }));
+}
+function showSchedule(v) {
+  sched = { ...v, rules: v.rules.map(r => ({ ...r, days: [...r.days] })) };
+  $('sched-sum').textContent = schedSummary(v) + (v.enabled && v.next ? ` · next on ${v.next}` : '');
+  $('sched-tz').textContent = (v.timezone || 'Australia/Sydney').split('/').pop().replace('_', ' ');
+  renderSchedule();
+}
+function addRule() { sched.rules.push({ days: [0, 1, 2, 3, 4, 5, 6], on: '06:00', off: '09:00' }); renderSchedule(); }
+async function loadSchedule() { try { showSchedule(await (await fetch('api/schedule')).json()); } catch {} }
+async function saveSchedule() {
+  const msg = $('sched-msg');
+  try {
+    const r = await fetch('api/schedule', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: $('sched-on').checked, rules: sched.rules }) });
+    const j = await r.json();
+    if (r.ok) { showSchedule(j); msg.className = 'err ok'; msg.textContent = 'Schedule saved.'; poll(); }
+    else { msg.className = 'err'; msg.textContent = j.error || 'Couldn’t save.'; }
+  } catch { msg.className = 'err'; msg.textContent = 'Couldn’t reach the server.'; }
 }
 
 // ---- ordering -----------------------------------------------------------
@@ -657,7 +734,7 @@ async function logCoffee() {
 $('m-switch').addEventListener('click', toggle);
 $('m-switch').addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
 initMenu().then(loadRecent);
-trackMine(); poll(); loadStock();
+trackMine(); poll(); loadStock(); loadSchedule();
 setInterval(poll, 5000); setInterval(trackMine, 15000); setInterval(loadStock, 30000);
 </script>
 </body>
