@@ -123,6 +123,19 @@
   .times { display:flex; align-items:center; gap:8px; margin-top:8px; }
   .times input { font:inherit; padding:8px; border-radius:8px; border:1px solid var(--line);
                  background:transparent; color:var(--fg); min-width:0; flex:1; }
+  .tl-head { display:flex; justify-content:space-between; align-items:baseline; margin-top:12px; }
+  .tl { position:relative; height:22px; background:var(--bar); border-radius:6px; overflow:hidden; margin-top:6px; }
+  .tl i { position:absolute; top:0; bottom:0; background:var(--on); }
+  .tl i.unk { background:repeating-linear-gradient(45deg, var(--muted) 0 3px, transparent 3px 7px); opacity:.6; }
+  .tl-ticks { position:relative; height:16px; font-size:11px; color:var(--muted); }
+  .tl-ticks span { position:absolute; top:2px; transform:translateX(-50%); white-space:nowrap; }
+  .tl-ticks span::before { content:""; position:absolute; left:50%; top:-26px; height:22px; border-left:1px solid var(--card); opacity:.7; }
+  .tl-events { list-style:none; padding:0; margin:8px 0 0; font-size:13px; }
+  .tl-events li { display:flex; gap:8px; padding:3px 0; border-top:1px solid var(--line); }
+  .tl-events li:first-child { border-top:0; }
+  .tl-events .tm { color:var(--muted); min-width:5.2em; }
+  .tl-events .on { color:var(--on); font-weight:600; min-width:2.2em; }
+  .tl-events .off { color:var(--off); font-weight:600; min-width:2.2em; }
   .times .x { flex:none; width:36px; padding:7px 0; border-radius:8px; border:1px solid var(--line);
               background:transparent; color:var(--muted); }
 </style>
@@ -319,6 +332,10 @@
   <div class="err machine-err" id="err"></div>
   <details class="sched" id="sched">
     <summary>Machine schedule · <span id="sched-sum">…</span></summary>
+    <div class="tl-head"><b>Last 24 hours</b><span class="muted" id="tl-total"></span></div>
+    <div class="tl" id="tl" role="img" aria-label="When the machine was on in the last 24 hours"></div>
+    <div class="tl-ticks" id="tl-ticks"></div>
+    <ol class="tl-events" id="tl-events"></ol>
     <label class="check"><input type="checkbox" id="sched-on"> Switch on and off automatically</label>
     <div id="sched-rows"></div>
     <div class="row">
@@ -535,7 +552,7 @@ async function toggle() {
   if (isOn === null) return;
   const q = isOn ? 'off' : 'on?minutes=' + $('mins').value;
   $('rocker').disabled = true;
-  try { show(await (await fetch('api/' + q, { method: 'POST' })).json()); } catch { $('err').textContent = 'Couldn’t reach the server.'; }
+  try { show(await (await fetch('api/' + q, { method: 'POST' })).json()); loadHistory(); } catch { $('err').textContent = 'Couldn’t reach the server.'; }
 }
 
 // ---- schedule -----------------------------------------------------------
@@ -575,6 +592,50 @@ function showSchedule(v) {
   $('sched-tz').textContent = (v.timezone || 'Australia/Sydney').split('/').pop().replace('_', ' ');
   renderSchedule();
 }
+// ---- power history (last 24 h) -------------------------------------------
+function fmtDur(s) { const h = Math.floor(s / 3600), m = Math.round(s % 3600 / 60); return h ? `${h} h ${m} min` : `${m} min`; }
+function renderHistory(h) {
+  const span = h.now - h.start, pct = t => (100 * (t - h.start) / span).toFixed(3) + '%';
+  const tz = h.timezone || 'Australia/Sydney';
+  const hourFmt = new Intl.DateTimeFormat('en-AU', { timeZone: tz, hour: 'numeric', hour12: false });
+  const timeFmt = new Intl.DateTimeFormat('en-AU', { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false });
+  const dayFmt = new Intl.DateTimeFormat('en-AU', { timeZone: tz, weekday: 'short' });
+  const today = dayFmt.format(new Date(h.now * 1000));
+  const segs = []; let onSecs = 0;
+  h.events.forEach((e, i) => {
+    const a = Math.max(e.t, h.start), b = i + 1 < h.events.length ? h.events[i + 1].t : h.now;
+    if (b <= a || e.on === false) return;
+    const seg = document.createElement('i');
+    seg.style.left = pct(a); seg.style.width = (100 * (b - a) / span).toFixed(3) + '%';
+    if (e.on === null) seg.className = 'unk'; else onSecs += b - a;
+    seg.title = `${e.on ? 'On' : 'Unreachable'} ${timeFmt.format(new Date(a * 1000))}–${timeFmt.format(new Date(b * 1000))}`;
+    segs.push(seg);
+  });
+  $('tl').replaceChildren(...segs);
+  const ticks = [];
+  for (let t = Math.ceil(h.start / 3600) * 3600; t < h.now; t += 3600) {
+    const hr = Number(hourFmt.format(new Date(t * 1000))) % 24;
+    if (hr % 3) continue;
+    const sp = document.createElement('span'); sp.style.left = pct(t);
+    sp.textContent = String(hr).padStart(2, '0'); ticks.push(sp);
+  }
+  $('tl-ticks').replaceChildren(...ticks);
+  const first = h.events[0];
+  $('tl-total').textContent = !first ? 'no data yet'
+    : `on ${fmtDur(onSecs)}` + (first.t > h.start ? ` since ${timeFmt.format(new Date(first.t * 1000))}` : '');
+  const items = h.events.filter(e => e.t > h.start).slice(-10).reverse().map(e => {
+    const li = document.createElement('li');
+    const d = new Date(e.t * 1000), day = dayFmt.format(d);
+    const tm = document.createElement('span'); tm.className = 'tm'; tm.textContent = (day === today ? '' : day + ' ') + timeFmt.format(d);
+    const st = document.createElement('span'); st.className = e.on ? 'on' : 'off';
+    st.textContent = e.on === null ? '?' : e.on ? 'On' : 'Off';
+    const why = document.createElement('span'); why.textContent = e.why;
+    li.append(tm, st, why); return li;
+  });
+  $('tl-events').replaceChildren(...items);
+}
+async function loadHistory() { try { renderHistory(await (await fetch('api/history?hours=24')).json()); } catch {} }
+
 function addRule() { sched.rules.push({ days: [0, 1, 2, 3, 4, 5, 6], on: '06:00', off: '09:00' }); renderSchedule(); }
 async function loadSchedule() { try { showSchedule(await (await fetch('api/schedule')).json()); } catch {} }
 async function saveSchedule() {
@@ -583,7 +644,7 @@ async function saveSchedule() {
     const r = await fetch('api/schedule', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled: $('sched-on').checked, rules: sched.rules }) });
     const j = await r.json();
-    if (r.ok) { showSchedule(j); msg.className = 'err ok'; msg.textContent = 'Schedule saved.'; poll(); }
+    if (r.ok) { showSchedule(j); msg.className = 'err ok'; msg.textContent = 'Schedule saved.'; poll(); loadHistory(); }
     else { msg.className = 'err'; msg.textContent = j.error || 'Couldn’t save.'; }
   } catch { msg.className = 'err'; msg.textContent = 'Couldn’t reach the server.'; }
 }
@@ -734,7 +795,8 @@ async function logCoffee() {
 $('m-switch').addEventListener('click', toggle);
 $('m-switch').addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
 initMenu().then(loadRecent);
-trackMine(); poll(); loadStock(); loadSchedule();
+trackMine(); poll(); loadStock(); loadSchedule(); loadHistory();
+setInterval(loadHistory, 60000);
 setInterval(poll, 5000); setInterval(trackMine, 15000); setInterval(loadStock, 30000);
 </script>
 </body>

@@ -37,6 +37,8 @@ POLL_S = 30
 TZ = ZoneInfo(os.environ.get("TZ") or "Australia/Sydney")
 SCHEDULE_FILE = os.environ.get("SCHEDULE_FILE", "/data/schedule.json")
 MAX_WINDOW_MIN = int(os.environ.get("MAX_SCHEDULE_MINUTES", "720"))
+HISTORY_FILE = os.environ.get("HISTORY_FILE", "/data/power-log.json")
+HISTORY_KEEP_S = 7 * 86400  # on/off changes only, so a week is a few hundred bytes
 START_GRACE_S = 15 * 60  # if the plug can't be reached at the start, keep trying this long
 DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 # Seeded from the Tapo app rules that were in use (on 05:45, off 11:00, every day).
@@ -358,6 +360,39 @@ def off_time(minutes):
     return until
 
 
+# --- Power history -------------------------------------------------------------
+# Only changes are stored ({"t", "on": true/false/null, "why"}); the watchdog already
+# polls the plug every POLL_S for its timers, so this adds no extra polling.
+history: list[dict] = []
+
+
+def load_history():
+    try:
+        with open(HISTORY_FILE) as f:
+            history[:] = [e for e in json.load(f) if "t" in e and "on" in e]
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        log.warning("power log unreadable, starting fresh: %s", e)
+
+
+def record(on, why):
+    if history and history[-1]["on"] == on:
+        return
+    history.append({"t": round(time.time()), "on": on, "why": why})
+    cutoff = time.time() - HISTORY_KEEP_S
+    while len(history) > 1 and history[1]["t"] < cutoff:
+        history.pop(0)  # keep one event from before the cutoff, so the state at the cutoff is known
+    try:
+        os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
+        tmp = HISTORY_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(history, f)
+        os.replace(tmp, HISTORY_FILE)
+    except OSError as e:
+        log.warning("couldn't save power log: %s", e)
+
+
 state = {"dev": None, "off_at": None, "error": None, "is_on": None, "on_since": None}
 WARMUP_MIN = int(os.environ.get("WARMUP_MINUTES", "20"))  # Minibar, 2 L boiler, 1500 W
 lock = asyncio.Lock()
@@ -389,6 +424,12 @@ async def refresh():
         dev = await device()
         state["is_on"] = dev.is_on
         state["error"] = None
+        if lock.locked():
+            pass  # a switch() is mid-flight and records its own reason
+        elif not history or history[-1]["on"] is None and history[-1]["why"] == "plug unreachable":
+            record(dev.is_on, "plug reachable again" if history else "first reading")
+        else:
+            record(dev.is_on, "plug button or Tapo app")  # no-op unless it changed behind our back
         since = getattr(dev, "on_since", None) if dev.is_on else None
         if since is not None:
             state["on_since"] = since.timestamp()
@@ -399,9 +440,10 @@ async def refresh():
     except Exception as e:  # drop the session and reconnect next time
         state["dev"], state["is_on"], state["error"] = None, None, str(e) or type(e).__name__
         log.warning("plug unreachable: %s", state["error"])
+        record(None, "plug unreachable")
 
 
-async def switch(on: bool, minutes: int | None = None):
+async def switch(on: bool, minutes: int | None = None, why: str = "coffee.lan"):
     async with lock:
         dev = await device()
         was_on = state["is_on"]
@@ -409,6 +451,7 @@ async def switch(on: bool, minutes: int | None = None):
         await dev.update()
         state["is_on"], state["error"] = dev.is_on, None
         state["off_at"] = off_time(minutes) if on else None
+        record(dev.is_on, why)
         if not on:
             state["on_since"] = None
         elif not was_on:
@@ -428,7 +471,7 @@ async def watchdog(app):
                 if state["is_on"]:
                     state["off_at"] = off_time(0)
                 else:
-                    await switch(True, 0)
+                    await switch(True, 0, "schedule")
                 schedule["started"] = win[2]
                 save_schedule()
                 log.info("schedule: on until %s", datetime.fromtimestamp(win[1], TZ).strftime("%H:%M"))
@@ -444,7 +487,8 @@ async def watchdog(app):
             state["off_at"] = None
         if state["is_on"] and state["off_at"] and now >= state["off_at"]:
             try:
-                await switch(False)
+                ends = {w[1] for w in windows_on(datetime.fromtimestamp(now, TZ).date())}
+                await switch(False, why="schedule ended" if state["off_at"] in ends else "auto-off timer")
                 log.info("auto-off")
             except Exception as e:
                 log.warning("auto-off failed: %s", e)
@@ -530,6 +574,19 @@ def schedule_view():
             "next": when(nxt[0]) if nxt else None}
 
 
+async def api_history(req):
+    try:
+        hours = max(1, min(int(req.query.get("hours", 24)), HISTORY_KEEP_S // 3600))
+    except ValueError:
+        hours = 24
+    now = time.time()
+    start = now - hours * 3600
+    before = [e for e in history if e["t"] <= start]
+    events = ([before[-1]] if before else []) + [e for e in history if e["t"] > start]
+    return web.json_response({"now": round(now), "start": round(start), "hours": hours,
+                              "timezone": str(TZ), "events": events})
+
+
 async def api_schedule(_):
     return web.json_response(schedule_view())
 
@@ -561,7 +618,7 @@ async def api_on(req):
         return web.json_response({"error": "minutes must be a number"}, status=400)
     minutes = max(1, min(minutes, MAX_MIN))
     try:
-        await switch(True, minutes)
+        await switch(True, minutes, "on button")
     except Exception as e:
         state["dev"] = None
         return web.json_response({**status(), "error": str(e)}, status=502)
@@ -570,7 +627,7 @@ async def api_on(req):
 
 async def api_off(_):
     try:
-        await switch(False)
+        await switch(False, why="off button")
     except Exception as e:
         state["dev"] = None
         return web.json_response({**status(), "error": str(e)}, status=502)
@@ -658,7 +715,7 @@ async def api_request(req):
         if warm:
             try:
                 if not state["is_on"]:
-                    await switch(True, DEFAULT_MIN)
+                    await switch(True, DEFAULT_MIN, "coffee order warm-up")
                 warmed = True
             except Exception as e:
                 state["dev"] = None
@@ -814,6 +871,7 @@ async def start_bg(app):
     load_orders()
     load_stock()
     load_schedule()
+    load_history()
     app["wd"] = asyncio.create_task(watchdog(app))
 
 
@@ -828,6 +886,7 @@ app.router.add_post("/api/request", api_request)
 app.router.add_get("/api/order/{oid}", api_order)
 app.router.add_post("/api/order/{oid}/{status}", api_order_set)
 app.router.add_get("/o/{oid}", order_page)
+app.router.add_get("/api/history", api_history)
 app.router.add_get("/api/schedule", api_schedule)
 app.router.add_post("/api/schedule", api_schedule_set)
 app.router.add_get("/api/stock", api_stock)
