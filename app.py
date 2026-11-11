@@ -1,4 +1,4 @@
-"""Coffee machine control: a tiny web page + API over a Tapo P100 smart plug.
+"""Coffee machine (and grinder) control: a tiny web page + API over smart plugs.
 
 Every "on" comes with an auto-off timer (default 30 min, max MAX_ON_MINUTES),
 and if the plug is found on with no timer running (pod restart, someone pressed
@@ -9,6 +9,12 @@ machine is switched on and off on a timetable: at a window's start the machine i
 switched on until the window's end. Inside a window, timers only ever get longer
 (a warm-up or "on" never cuts the window short); pressing Off still wins until
 the next window. The Tapo app's own schedules should stay disabled.
+
+Settings (/data/settings.json) pick the mode (machine only, or machine + grinder)
+and which plug does what (Tapo/Kasa, Shelly or Tasmota; see plugs.py). The grinder
+is run for timed single-dose grinds that never break its duty cycle (Mazzer Mini:
+50 s on / 50 s off). A plug that measures power feeds power.py, which measures
+warm-ups and keeps daily numbers for spotting wear.
 """
 import asyncio
 import base64
@@ -25,11 +31,11 @@ from zoneinfo import ZoneInfo
 import aiohttp
 from aiohttp import web
 from urllib.parse import quote
-from kasa import Credentials, Device, DeviceConfig, Discover
 
-HOST = os.environ.get("TAPO_HOST", "192.168.88.10")
-USER = os.environ.get("TAPO_USERNAME", "")
-PASS = os.environ.get("TAPO_PASSWORD", "")
+import plugs
+from power import Analyzer
+
+HOST = os.environ.get("TAPO_HOST", "192.168.88.10")  # the machine's plug until settings say otherwise
 DEFAULT_MIN = int(os.environ.get("DEFAULT_ON_MINUTES", "30"))
 MAX_MIN = int(os.environ.get("MAX_ON_MINUTES", "60"))
 POLL_S = 30
@@ -465,72 +471,406 @@ def record(on, why):
         log.warning("couldn't save power log: %s", e)
 
 
-state = {"dev": None, "off_at": None, "error": None, "is_on": None, "on_since": None}
-WARMUP_MIN = int(os.environ.get("WARMUP_MINUTES", "20"))  # Minibar, 2 L boiler, 1500 W
+state = {"off_at": None, "error": None, "is_on": None, "on_since": None}
+WARMUP_MIN = int(os.environ.get("WARMUP_MINUTES", "20"))  # Minibar, 2 L boiler (estimate until measured)
 lock = asyncio.Lock()
 
+# --- Settings ----------------------------------------------------------------------
+SETTINGS_FILE = os.environ.get("SETTINGS_FILE", "/data/settings.json")
+MODES = {"machine": "Machine only", "machine+grinder": "Machine and grinder"}
+GRINDER_PLATE_S = 50  # Mazzer Mini MAN rating plate: 50 s on / 50 s off
+SCAN_SUBNET = os.environ.get("SCAN_SUBNET", "")
+settings = {
+    "mode": "machine",
+    "plugs": {"machine": {"driver": "tapo", "host": HOST}, "grinder": {"driver": "tapo", "host": ""}},
+    "machine": {"warmup_min": WARMUP_MIN, "heater_w": 600, "pump_w": 60, "sample_s": 2},
+    "grinder": {"dose_g": 18, "grind_s": {b: None for b in ("Regular", "Decaf", "Half & half")}, "extra_s": 3.0,
+                "max_run_s": GRINDER_PLATE_S, "on_match": "notify", "call_on_match": False, "backstop": True},
+}
 
-async def device() -> Device:
-    if state["dev"] is None:
-        if not (USER and PASS):
-            raise RuntimeError("TP-Link login not set (secret tapo-credentials)")
-        creds = Credentials(USER, PASS)
-        try:
-            dev = await Discover.discover_single(HOST, credentials=creds, timeout=5)
-        except Exception:
-            # UDP discovery can be filtered; fall back to the P100's usual transport.
-            cfg = DeviceConfig.from_dict({
-                "host": HOST,
-                "connection_type": {"device_family": "SMART.TAPOPLUG",
-                                    "encryption_type": "KLAP", "login_version": 2},
-            })
-            cfg.credentials = creds
-            dev = await Device.connect(config=cfg)
-        state["dev"] = dev
-    await state["dev"].update()
-    return state["dev"]
+
+def num(value, lo, hi, what, digits=1):
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{what} must be a number")
+    if not lo <= v <= hi:
+        raise ValueError(f"{what} must be between {lo:g} and {hi:g}")
+    return round(v, digits)
+
+
+def merge_settings(body, base):
+    """Validated copy of base with body's changes applied; raises ValueError."""
+    out = json.loads(json.dumps(base))
+    if "mode" in body:
+        if body["mode"] not in MODES:
+            raise ValueError("unknown mode")
+        out["mode"] = body["mode"]
+    for role, p in (body.get("plugs") or {}).items():
+        if role not in out["plugs"] or not isinstance(p, dict):
+            raise ValueError("plugs are 'machine' and 'grinder'")
+        driver, host = p.get("driver", out["plugs"][role]["driver"]), str(p.get("host", out["plugs"][role]["host"])).strip()
+        if driver not in plugs.DRIVERS:
+            raise ValueError(f"unknown plug type {driver!r}")
+        if host and not re.fullmatch(r"[A-Za-z0-9.\-]{1,253}", host):
+            raise ValueError("the plug address should be an IP address or host name")
+        out["plugs"][role] = {"driver": driver, "host": host}
+    m = body.get("machine") or {}
+    if "warmup_min" in m:
+        out["machine"]["warmup_min"] = int(num(m["warmup_min"], 1, 90, "warm-up minutes", 0))
+    if "heater_w" in m:
+        out["machine"]["heater_w"] = num(m["heater_w"], 100, 3000, "heater threshold", 0)
+    if "pump_w" in m:
+        out["machine"]["pump_w"] = num(m["pump_w"], 10, 1000, "pump threshold", 0)
+    if "sample_s" in m:
+        out["machine"]["sample_s"] = num(m["sample_s"], 1, 30, "sample interval", 0)
+    g = body.get("grinder") or {}
+    if "dose_g" in g:
+        out["grinder"]["dose_g"] = num(g["dose_g"], 5, 30, "dose")
+    if "extra_s" in g:
+        out["grinder"]["extra_s"] = num(g["extra_s"], 0, 15, "extra seconds")
+    if "max_run_s" in g:
+        out["grinder"]["max_run_s"] = num(g["max_run_s"], 5, GRINDER_PLATE_S, "longest run", 0)
+    for beans, s in (g.get("grind_s") or {}).items():
+        if beans not in out["grinder"]["grind_s"]:
+            raise ValueError(f"unknown beans {beans!r}")
+        out["grinder"]["grind_s"][beans] = None if s in (None, "") else num(s, 1, GRINDER_PLATE_S, "grind time")
+    if "on_match" in g:
+        if g["on_match"] not in ("notify", "grind"):
+            raise ValueError("on_match is notify or grind")
+        out["grinder"]["on_match"] = g["on_match"]
+    for flag in ("call_on_match", "backstop"):
+        if flag in g:
+            out["grinder"][flag] = bool(g[flag])
+    return out
+
+
+def load_settings():
+    try:
+        with open(SETTINGS_FILE) as f:
+            settings.update(merge_settings(json.load(f), settings))
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        log.warning("settings unreadable, using defaults: %s", e)
+
+
+def save_settings():
+    try:
+        os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
+        tmp = SETTINGS_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(settings, f, indent=1)
+        os.replace(tmp, SETTINGS_FILE)
+    except OSError as e:
+        log.warning("couldn't save settings: %s", e)
+
+
+# --- Plugs -------------------------------------------------------------------------
+live_plugs: dict[str, plugs.Plug | None] = {"machine": None, "grinder": None}
+
+
+def plug(role) -> plugs.Plug | None:
+    want = settings["plugs"][role]
+    p = live_plugs[role]
+    if p is None or p.driver != want["driver"] or p.host != want["host"]:
+        if p is not None:
+            asyncio.create_task(p.close())
+        p = live_plugs[role] = plugs.make(want["driver"], want["host"])
+    return p
+
+
+def machine_plug():
+    p = plug("machine")
+    if p is None:
+        raise RuntimeError("No plug set for the machine (Settings)")
+    return p
 
 
 async def refresh():
     try:
-        dev = await device()
-        state["is_on"] = dev.is_on
+        p = await machine_plug().update(max_age=3)
+        state["is_on"] = p.is_on
         state["error"] = None
         if lock.locked():
             pass  # a switch() is mid-flight and records its own reason
         elif not history or history[-1]["on"] is None and history[-1]["why"] == "plug unreachable":
-            record(dev.is_on, "plug reachable again" if history else "first reading")
+            record(p.is_on, "plug reachable again" if history else "first reading")
         else:
-            record(dev.is_on, "plug button or Tapo app")  # no-op unless it changed behind our back
-        since = getattr(dev, "on_since", None) if dev.is_on else None
-        if since is not None:
-            state["on_since"] = since.timestamp()
-        elif not dev.is_on:
+            record(p.is_on, "plug button or plug app")  # no-op unless it changed behind our back
+        if p.on_since is not None:
+            state["on_since"] = p.on_since
+        elif not p.is_on:
             state["on_since"] = None
         elif state["on_since"] is None:
             state["on_since"] = time.time()
-    except Exception as e:  # drop the session and reconnect next time
-        state["dev"], state["is_on"], state["error"] = None, None, str(e) or type(e).__name__
+    except Exception as e:  # the plug drops its session and reconnects next time
+        state["is_on"], state["error"] = None, str(e) or type(e).__name__
         log.warning("plug unreachable: %s", state["error"])
         record(None, "plug unreachable")
 
 
 async def switch(on: bool, minutes: int | None = None, why: str = "coffee.lan"):
     async with lock:
-        dev = await device()
+        p = machine_plug()
         was_on = state["is_on"]
-        await (dev.turn_on() if on else dev.turn_off())
-        await dev.update()
-        state["is_on"], state["error"] = dev.is_on, None
+        await p.turn(on)
+        state["is_on"], state["error"] = p.is_on, None
         state["off_at"] = off_time(minutes) if on else None
-        record(dev.is_on, why)
+        record(p.is_on, why)
+        wake_sampler.set()
         if not on:
             state["on_since"] = None
         elif not was_on:
-            since = getattr(dev, "on_since", None)
-            state["on_since"] = since.timestamp() if since else time.time()
+            state["on_since"] = p.on_since or time.time()
         log.info("turned %s%s", "on" if on else "off",
                  f" until {datetime.fromtimestamp(state['off_at'], TZ):%H:%M}" if on else "")
+
+
+# --- Power samples (plugs that measure watts) --------------------------------------
+MAINT_FILE = os.environ.get("MAINTENANCE_FILE", "/data/maintenance.json")
+analyzer: Analyzer | None = None  # created at start-up, once settings are loaded
+wake_sampler = asyncio.Event()  # set on switch-on / new settings, so sampling starts at once
+
+
+async def sampler():
+    """Read the machine's watts every sample_s while it's on (every POLL_S while off)."""
+    while True:
+        delay = POLL_S
+        try:
+            p = plug("machine")
+            if p is not None and p.metered is not False:
+                await p.update(max_age=0.5)
+                if p.metered:
+                    analyzer.add(time.time(), p.watts, p.volts, bool(p.is_on))
+                    if p.is_on:
+                        delay = settings["machine"]["sample_s"]
+        except Exception:
+            pass  # refresh() reports the plug being unreachable
+        wake_sampler.clear()
+        try:
+            await asyncio.wait_for(wake_sampler.wait(), delay)
+        except asyncio.TimeoutError:
+            pass
+
+
+def warm_seconds_left():
+    if not (state["is_on"] and state["on_since"]):
+        return None
+    p = live_plugs["machine"]
+    measured = analyzer.warm() if analyzer and p is not None and p.metered else None
+    if measured and measured["ready"]:
+        return 0
+    est = (analyzer.typical_warmup_s() if analyzer else None) or settings["machine"]["warmup_min"] * 60
+    left = max(0, int(est - (time.time() - state["on_since"])))
+    if measured and left < 30:
+        left = 30  # the plug says the heater hasn't cut out yet: almost, not quite
+    return left
+
+
+def warmup_minutes():
+    typical = analyzer.typical_warmup_s() if analyzer else None
+    return round(typical / 60) if typical else settings["machine"]["warmup_min"]
+
+
+# --- Grinder -----------------------------------------------------------------------
+# Single dosing: load one dose in the hopper with the cup under the chute and tell
+# coffee.lan (which switches the grinder's plug off, so its own switch can be left
+# on), then each grind is a timed run: the measured grind time for those beans plus
+# a little extra, never longer than max_run_s, followed by an equal rest.
+GRINDER_FILE = os.environ.get("GRINDER_FILE", "/data/grinder.json")
+grinder = {"dose": None, "rest_until": 0.0, "totals": {"runs": 0, "motor_s": 0.0, "grams": 0.0},
+           "run": None, "on": None, "error": None, "backstop": None, "found_on_at": None, "last": None}
+grind_task: dict[str, asyncio.Task | None] = {"t": None}
+
+
+def load_grinder():
+    try:
+        with open(GRINDER_FILE) as f:
+            data = json.load(f)
+        for k in ("dose", "rest_until", "totals"):
+            if k in data:
+                grinder[k] = data[k]
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        log.warning("grinder state unreadable: %s", e)
+
+
+def save_grinder():
+    try:
+        os.makedirs(os.path.dirname(GRINDER_FILE), exist_ok=True)
+        tmp = GRINDER_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({k: grinder[k] for k in ("dose", "rest_until", "totals")}, f)
+        os.replace(tmp, GRINDER_FILE)
+    except OSError as e:
+        log.warning("couldn't save grinder state: %s", e)
+
+
+def grinder_enabled():
+    return settings["mode"] == "machine+grinder" and bool(settings["plugs"]["grinder"]["host"])
+
+
+def grind_seconds(beans):
+    """How long to run for one dose of these beans, or None if it hasn't been timed yet."""
+    g = settings["grinder"]
+    base = g["grind_s"].get(beans) or g["grind_s"].get("Regular")
+    if not base:
+        return None
+    return round(min(base + g["extra_s"], g["max_run_s"]), 1)
+
+
+def grinder_view():
+    now = time.time()
+    run = grinder["run"]
+    dose = grinder["dose"]
+    return {"enabled": grinder_enabled(), "on": grinder["on"], "error": grinder["error"],
+            "dose": dose, "grind_s": grind_seconds(dose["beans"]) if dose else None,
+            "run": None if not run else {"why": run["why"], "seconds": round(now - run["start"], 1),
+                                         "of": round(run["until"] - run["start"], 1), "beans": run.get("beans")},
+            "rest_s": max(0, round(grinder["rest_until"] - now)), "totals": grinder["totals"],
+            "backstop": grinder["backstop"], "max_run_s": settings["grinder"]["max_run_s"],
+            "timed": {b: s for b, s in settings["grinder"]["grind_s"].items()}}
+
+
+class GrinderBusy(Exception):
+    pass
+
+
+async def grind(seconds, why, beans=None):
+    """Start a timed run. Raises GrinderBusy (running, resting) or the plug's error."""
+    p = plug("grinder")
+    if p is None or not grinder_enabled():
+        raise GrinderBusy("The grinder isn't set up (Settings)")
+    if grinder["run"]:
+        raise GrinderBusy("Already grinding")
+    rest = grinder["rest_until"] - time.time()
+    if rest > 0:
+        raise GrinderBusy(f"The grinder is resting for {int(rest) + 1} s more (50 s on / 50 s off)")
+    seconds = min(float(seconds), settings["grinder"]["max_run_s"])
+    grinder["run"] = {"start": time.time(), "until": time.time() + seconds, "why": why, "beans": beans, "watts": []}
+    try:
+        await p.turn(True)
+    except Exception as e:
+        grinder["run"] = None
+        grinder["error"] = str(e) or type(e).__name__
+        raise
+    run = grinder["run"]
+    run["start"], run["until"] = time.time(), time.time() + seconds  # time the motor, not the network
+    grinder["on"], grinder["error"] = True, None
+    grind_task["t"] = asyncio.create_task(_grind_timer(run))
+    log.info("grinder on for %.1f s (%s)", seconds, why)
+
+
+async def _grind_timer(run):
+    try:
+        while time.time() < run["until"]:
+            await asyncio.sleep(min(1.0, max(0.05, run["until"] - time.time())))
+            p = live_plugs["grinder"]
+            if p is not None and p.metered and time.time() < run["until"] - 0.5:
+                try:
+                    await p.update()
+                    if p.watts:
+                        run["watts"].append(p.watts)
+                except Exception:
+                    pass
+    except asyncio.CancelledError:
+        pass
+    finally:
+        await grinder_off("timer" if time.time() >= run["until"] else "stopped")
+
+
+async def grinder_off(how):
+    """Switch the grinder off (retrying) and close out the run, if any."""
+    p = plug("grinder")
+    for attempt in range(6):
+        try:
+            if p is not None:
+                await p.turn(False)
+            grinder["on"], grinder["error"] = False if p else None, None
+            break
+        except Exception as e:
+            grinder["error"] = f"Couldn't switch the grinder off: {e}"
+            log.warning("grinder off failed (try %d): %s", attempt + 1, e)
+            await asyncio.sleep(1)
+    run, grinder["run"] = grinder["run"], None
+    grind_task["t"] = None
+    if not run:
+        return None
+    ran = round(time.time() - run["start"], 1)
+    grinder["rest_until"] = time.time() + ran  # rest as long as it ran (plate: 50 s on / 50 s off)
+    t = grinder["totals"]
+    t["runs"] += 1
+    t["motor_s"] = round(t["motor_s"] + ran, 1)
+    result = {"ran": ran, "why": run["why"], "how": how}
+    dose = grinder["dose"]
+    if run["why"] == "grind" and dose and dose["status"] == "loaded":
+        dose["status"], dose["ground_at"] = "ground", time.time()
+        t["grams"] = round(t["grams"] + dose["grams"], 1)
+    if run["why"] == "teach":
+        if how == "stopped" and run.get("beans"):
+            settings["grinder"]["grind_s"][run["beans"]] = ran
+            save_settings()
+            result["timed"] = ran
+            if dose and dose["status"] == "loaded":
+                dose["status"], dose["ground_at"] = "ground", time.time()
+                t["grams"] = round(t["grams"] + dose["grams"], 1)
+        else:
+            result["error"] = f"Hit the {run['until'] - run['start']:.0f} s limit, so that wasn't saved as a grind time"
+    mean_w = sum(run["watts"]) / len(run["watts"]) if run["watts"] else None
+    if analyzer:
+        analyzer.grinder_run(time.time(), ran, dose["grams"] if run["why"] != "teach" and dose else 0, mean_w)
+    grinder["last"] = {**result, "at": time.time()}
+    save_grinder()
+    log.info("grinder off after %.1f s (%s, %s)", ran, run["why"], how)
+    return result
+
+
+async def set_backstop():
+    """Have the grinder's plug switch itself off shortly after the longest run, if it can."""
+    p = plug("grinder")
+    if p is None or not grinder_enabled():
+        grinder["backstop"] = None
+        return
+    try:
+        if settings["grinder"]["backstop"]:
+            grinder["backstop"] = await p.set_backstop(int(settings["grinder"]["max_run_s"]) + 5)
+        else:
+            grinder["backstop"] = await p.set_backstop(None)
+    except Exception as e:
+        grinder["backstop"] = f"not set: {e}"
+    log.info("grinder backstop: %s", grinder["backstop"])
+
+
+async def grinder_watch():
+    """Every few seconds: is the grinder on when it shouldn't be? Cut it at max_run_s."""
+    backstop_for = None
+    while True:
+        await asyncio.sleep(3)
+        if not grinder_enabled():
+            grinder["on"] = grinder["found_on_at"] = None
+            continue
+        p = plug("grinder")
+        try:
+            if backstop_for != (p.driver, p.host, settings["grinder"]["backstop"], settings["grinder"]["max_run_s"]):
+                await set_backstop()
+                backstop_for = (p.driver, p.host, settings["grinder"]["backstop"], settings["grinder"]["max_run_s"])
+            if grinder["run"]:
+                continue  # the run's own timer handles it
+            await p.update(max_age=1)
+            grinder["on"], grinder["error"] = p.is_on, None
+            if p.is_on:
+                grinder["found_on_at"] = grinder["found_on_at"] or time.time()
+                if time.time() - grinder["found_on_at"] >= settings["grinder"]["max_run_s"]:
+                    log.warning("grinder found on outside a run; switching it off (duty cycle)")
+                    grinder["run"] = {"start": grinder["found_on_at"], "until": time.time(), "why": "safety", "watts": []}
+                    await grinder_off("safety")
+            else:
+                grinder["found_on_at"] = None
+        except Exception as e:
+            grinder["on"], grinder["error"] = None, str(e) or type(e).__name__
+            backstop_for = None
 
 
 async def watchdog(app):
@@ -588,7 +928,7 @@ def check_nudges(now):
         done = o.get("nudges", 0)
         if oid in calling or done >= len(NUDGE_AFTER_MIN) or started(o):
             continue
-        if now - o["created"] >= NUDGE_AFTER_MIN[done] * 60:
+        if now - o["created"] >= NUDGE_AFTER_MIN[done] * 60 or (done == 0 and o.get("call_now")):
             calling.add(oid)
             asyncio.create_task(nudge(oid))
 
@@ -601,8 +941,12 @@ async def nudge(oid):
             return
         mins = max(1, int((time.time() - o["created"]) // 60))
         who = "Someone" if o["who"] == "someone" else o["who"]
-        text = (f"Hi {BARISTA_NAME}, it's Spruik. {who} ordered a coffee {mins} minutes ago, "
-                f"and it hasn't been started. {spoken(o)}.")
+        if o.get("call_now") and mins < 2:
+            text = (f"Hi {BARISTA_NAME}, it's Spruik. {who} just ordered a coffee, "
+                    f"and a matching dose is loaded in the grinder. {spoken(o)}.")
+        else:
+            text = (f"Hi {BARISTA_NAME}, it's Spruik. {who} ordered a coffee {mins} minutes ago, "
+                    f"and it hasn't been started. {spoken(o)}.")
         if o.get("note"):
             text += f" Their note says: {o['note']}."
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=150)) as s:
@@ -628,15 +972,17 @@ def status():
     left = None
     if state["is_on"] and state["off_at"]:
         left = max(0, int(state["off_at"] - time.time()))
-    warm_left = None
-    if state["is_on"] and state["on_since"]:
-        warm_left = max(0, int(WARMUP_MIN * 60 - (time.time() - state["on_since"])))
     win, nxt = current_window(), next_window()
+    p = live_plugs["machine"]
     return {"on": state["is_on"], "seconds_left": left, "error": state["error"],
-            "warm_seconds_left": warm_left, "warmup_minutes": WARMUP_MIN,
+            "warm_seconds_left": warm_seconds_left(), "warmup_minutes": warmup_minutes(),
+            "warm_measured": bool(p is not None and p.metered),
+            "watts": None if p is None or p.watts is None or not p.metered else round(p.watts),
             "default_minutes": DEFAULT_MIN, "max_minutes": MAX_MIN,
             "scheduled_until": datetime.fromtimestamp(win[1], TZ).strftime("%H:%M") if win else None,
-            "next_scheduled": when(nxt[0]) if nxt else None}
+            "next_scheduled": when(nxt[0]) if nxt else None,
+            "mode": settings["mode"], "plug": settings["plugs"]["machine"],
+            "plug_model": p.model if p is not None else "", "grinder": grinder_view()}
 
 
 def schedule_view():
@@ -692,7 +1038,6 @@ async def api_on(req):
     try:
         await switch(True, minutes, "on button")
     except Exception as e:
-        state["dev"] = None
         return web.json_response({**status(), "error": str(e)}, status=502)
     return web.json_response(status())
 
@@ -701,7 +1046,6 @@ async def api_off(_):
     try:
         await switch(False, why="off button")
     except Exception as e:
-        state["dev"] = None
         return web.json_response({**status(), "error": str(e)}, status=502)
     return web.json_response(status())
 
@@ -790,23 +1134,26 @@ async def api_request(req):
                     await switch(True, DEFAULT_MIN, "coffee order warm-up")
                 warmed = True
             except Exception as e:
-                state["dev"] = None
                 warmed = False
                 log.warning("warm-up failed: %s", e)
+
+        dose_lines, match = await dose_for(order)
 
         oid = secrets.token_urlsafe(12)
         now = time.time()
         entry = {**order, "who": who, "note": note, "phone": phone,
                  "status": "waiting", "created": now, "updated": now,
-                 "warmed": warmed is True, "nudges": 0}
+                 "warmed": warmed is True, "nudges": 0, "dose_match": match,
+                 "call_now": bool(match and settings["grinder"]["call_on_match"])}
 
-        lines = [f"☕ Coffee request from {who}", describe(order)]
+        lines = (["🚨 READY TO GO: matching dose loaded"] if match else []) + [f"☕ Coffee request from {who}", describe(order)]
         if note:
             lines.append(f"Note: {note}")
         if warmed is True:
             lines.append("The machine is on and warming up.")
         elif warmed is False:
             lines.append("(Couldn't switch the machine on.)")
+        lines += dose_lines
         if phone:
             lines.append("They've been sent a confirmation on Signal.")
         lines.append(f"Mark it made / delivered: {BASE_URL}/o/{oid}")
@@ -839,6 +1186,35 @@ async def api_request(req):
                               "confirmed": confirmed, **status()})
 
 
+async def dose_for(order):
+    """Signal lines about the grinder for a new order, and whether the loaded dose matches it.
+    A match is the next level of alarm: the message is flagged, and (if set) it grinds now
+    and Spruik calls straight away instead of after a few minutes."""
+    if not grinder_enabled():
+        return [], False
+    dose, beans = grinder["dose"], order["beans"]
+    if not dose:
+        return ["🫙 No dose loaded in the grinder."], False
+    what = f"{dose['beans'].lower()} dose ({dose['grams']:g} g)"
+    if dose["beans"] != beans:
+        return [f"⚠️ The grinder has a {what} loaded, but this order is {beans.lower()}."], False
+    if dose["status"] == "ground":
+        return [f"🟢 A {what} is already ground and waiting in the cup."], True
+    lines = [f"🟢 A {what} is loaded and matches."]
+    if settings["grinder"]["on_match"] == "grind":
+        secs = grind_seconds(beans)
+        try:
+            if not secs:
+                raise GrinderBusy("no grind time set yet")
+            await grind(secs, "grind", beans)
+            lines.append(f"Grinding it now ({secs:g} s); it'll be in the cup.")
+        except Exception as e:
+            lines.append(f"Couldn't grind it automatically: {e}.")
+    else:
+        lines.append(f"Grind it: {BASE_URL}/#grinder")
+    return lines, True
+
+
 def find_order(req):
     prune()
     return orders.get(req.match_info["oid"])
@@ -864,6 +1240,10 @@ async def api_order_set(req):
     if new in ("made", "delivered") and not o.get("stock_used"):
         o["stock_used"] = True
         await warn_low(use_stock(o))
+        dose = grinder["dose"]
+        if dose and dose["beans"] == o.get("beans", "Regular") and not grinder["run"]:
+            grinder["dose"] = None  # that dose went into this coffee
+            save_grinder()
     if new == "made" and was == "waiting" and o.get("phone"):
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as s:
@@ -1043,6 +1423,210 @@ async def order_page(_):
     return web.FileResponse(os.path.join(os.path.dirname(__file__), "order.html"))
 
 
+async def settings_page(_):
+    return web.FileResponse(os.path.join(os.path.dirname(__file__), "settings.html"))
+
+
+# --- Settings, plugs and grinder API -------------------------------------------------
+def settings_view():
+    return {**settings, "modes": MODES, "drivers": plugs.DRIVERS, "beans": MENU["beans"],
+            "plate_s": GRINDER_PLATE_S, "scan_subnet": scan_subnet(),
+            "live": {r: (p.info() if (p := live_plugs[r]) is not None and p.updated else None) for r in live_plugs}}
+
+
+def scan_subnet():
+    if SCAN_SUBNET:
+        return SCAN_SUBNET
+    for role in ("machine", "grinder"):
+        h = settings["plugs"][role]["host"]
+        if re.fullmatch(r"\d+\.\d+\.\d+\.\d+", h):
+            return h.rsplit(".", 1)[0] + ".0/24"
+    return "192.168.88.0/24"
+
+
+async def api_settings(_):
+    return web.json_response(settings_view())
+
+
+async def api_settings_set(req):
+    try:
+        new = merge_settings(await req.json(), settings)
+    except (ValueError, TypeError, AttributeError, json.JSONDecodeError) as e:
+        return web.json_response({"error": str(e) or "bad settings"}, status=400)
+    if new["plugs"]["machine"]["host"] and new["plugs"]["machine"] == new["plugs"]["grinder"]:
+        return web.json_response({"error": "The machine and the grinder need different plugs"}, status=400)
+    if grinder["run"] and new["plugs"]["grinder"] != settings["plugs"]["grinder"]:
+        return web.json_response({"error": "Wait for the grinder to finish first"}, status=409)
+    old_machine = dict(settings["plugs"]["machine"])
+    settings.update(new)
+    save_settings()
+    analyzer.settings = settings["machine"]  # thresholds apply from the next sample
+    wake_sampler.set()
+    if settings["plugs"]["machine"] != old_machine:
+        record(None, "machine plug changed")
+        state.update(is_on=None, off_at=None, on_since=None)
+        await refresh()
+    log.info("settings saved: mode=%s plugs=%s", settings["mode"], settings["plugs"])
+    return web.json_response(settings_view())
+
+
+async def api_plug_test(req):
+    """Try a plug without saving it: model, on/off, watts."""
+    try:
+        body = await req.json()
+        p = plugs.make(body.get("driver"), str(body.get("host") or ""))
+        if p is None:
+            raise ValueError("pick a plug type and address")
+    except (ValueError, json.JSONDecodeError, AttributeError) as e:
+        return web.json_response({"error": str(e) or "bad request"}, status=400)
+    current = [r for r in live_plugs if live_plugs[r] is not None
+               and (live_plugs[r].driver, live_plugs[r].host) == (p.driver, p.host)]
+    if current:
+        p = live_plugs[current[0]]  # same plug already connected: reuse its session
+    try:
+        await asyncio.wait_for(p.update(), 15)
+        return web.json_response({"ok": True, **p.info()})
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e) or type(e).__name__}, status=502)
+    finally:
+        if not current:
+            await p.close()
+
+
+async def api_plug_scan(req):
+    try:
+        found = await asyncio.wait_for(plugs.scan(req.query.get("subnet") or scan_subnet()), 30)
+    except (ValueError, asyncio.TimeoutError) as e:
+        return web.json_response({"error": str(e) or "scan took too long"}, status=400)
+    for f in found:
+        f["role"] = next((r for r in live_plugs if settings["plugs"][r]["host"] == f["host"]), None)
+    return web.json_response({"subnet": req.query.get("subnet") or scan_subnet(), "found": found})
+
+
+async def api_grinder(_):
+    return web.json_response(grinder_view())
+
+
+def grinder_error(e, status=409):
+    return web.json_response({**grinder_view(), "error": str(e)}, status=status)
+
+
+async def api_grinder_load(req):
+    """A dose is in the hopper: switch the plug off so the grinder's own switch can be turned on."""
+    if not grinder_enabled():
+        return grinder_error("The grinder isn't set up (Settings)")
+    if grinder["run"]:
+        return grinder_error("Wait for the grinder to finish")
+    try:
+        body = await req.json()
+    except Exception:
+        body = {}
+    beans = body.get("beans", "Regular")
+    if beans not in MENU["beans"]:
+        return grinder_error("pick the beans", 400)
+    try:
+        grams = num(body.get("grams", settings["grinder"]["dose_g"]), 5, 30, "dose")
+        await plug("grinder").turn(False)
+        grinder["on"], grinder["error"], grinder["found_on_at"] = False, None, None
+    except ValueError as e:
+        return grinder_error(e, 400)
+    except Exception as e:
+        grinder["error"] = str(e)
+        return grinder_error(f"Couldn't switch the grinder's plug off ({e}), so don't turn its switch on yet", 502)
+    grinder["dose"] = {"beans": beans, "grams": grams, "status": "loaded", "at": time.time()}
+    save_grinder()
+    log.info("dose loaded: %s %.1f g", beans, grams)
+    return web.json_response(grinder_view())
+
+
+async def api_grinder_grind(req):
+    try:
+        body = await req.json()
+    except Exception:
+        body = {}
+    dose = grinder["dose"]
+    if not (dose and dose["status"] == "loaded") and not body.get("anyway"):
+        return grinder_error("Load a dose first")
+    beans = dose["beans"] if dose else "Regular"
+    secs = grind_seconds(beans)
+    if not secs:
+        return grinder_error("Time a grind first (Settings → Grinder)")
+    try:
+        await grind(secs, "grind", beans)
+    except GrinderBusy as e:
+        return grinder_error(e)
+    except Exception as e:
+        return grinder_error(f"Couldn't switch the grinder on: {e}", 502)
+    return web.json_response(grinder_view())
+
+
+async def api_grinder_teach(req):
+    """Start a timed grind; stop it when the beans are gone and that time is saved for these beans."""
+    try:
+        body = await req.json()
+    except Exception:
+        body = {}
+    beans = body.get("beans") or (grinder["dose"] or {}).get("beans") or "Regular"
+    if beans not in MENU["beans"]:
+        return grinder_error("pick the beans", 400)
+    try:
+        await grind(settings["grinder"]["max_run_s"], "teach", beans)
+    except GrinderBusy as e:
+        return grinder_error(e)
+    except Exception as e:
+        return grinder_error(f"Couldn't switch the grinder on: {e}", 502)
+    return web.json_response(grinder_view())
+
+
+async def api_grinder_stop(_):
+    task = grind_task["t"]
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return web.json_response({**grinder_view(), "result": grinder["last"]})
+    if grinder_enabled():
+        try:
+            await plug("grinder").turn(False)
+            grinder["on"] = False
+        except Exception as e:
+            return grinder_error(f"Couldn't switch the grinder off: {e}", 502)
+    return web.json_response(grinder_view())
+
+
+async def api_grinder_clear(_):
+    if grinder["run"]:
+        return grinder_error("Wait for the grinder to finish")
+    grinder["dose"] = None
+    save_grinder()
+    return web.json_response(grinder_view())
+
+
+async def api_power(req):
+    try:
+        minutes = max(1, min(int(req.query.get("minutes", 10)), 30))
+    except ValueError:
+        minutes = 10
+    p = live_plugs["machine"]
+    return web.json_response({"metered": bool(p is not None and p.metered), "now": time.time(),
+                              "samples": analyzer.live_view(minutes), "heater_w": settings["machine"]["heater_w"],
+                              "pump_w": settings["machine"]["pump_w"],
+                              "heater_on": analyzer.heater_on, "pumping": analyzer.pump is not None})
+
+
+async def api_maintenance(_):
+    return web.json_response({"days": analyzer.daily_view()[-60:], "trends": analyzer.trends(),
+                              "typical_warmup_min": warmup_minutes(), "grinder_totals": grinder["totals"]})
+
+
+async def api_sim_pump(req):
+    """Testing only (COFFEE_SIM=1): pretend the pump runs for a few seconds."""
+    plugs.SimPlug.pump_until = time.time() + float(req.query.get("s", 25))
+    return web.json_response({"ok": True})
+
+
 async def healthz(_):
     return web.Response(text="ok")
 
@@ -1052,12 +1636,25 @@ async def index(_):
 
 
 async def start_bg(app):
+    global analyzer
+    load_settings()
     load_orders()
     load_stock()
     load_casefile()
     load_schedule()
     load_history()
+    load_grinder()
+    analyzer = Analyzer(MAINT_FILE, TZ, settings["machine"])
     app["wd"] = asyncio.create_task(watchdog(app))
+    app["sampler"] = asyncio.create_task(sampler())
+    app["grinder"] = asyncio.create_task(grinder_watch())
+
+
+async def stop_bg(app):
+    if grinder["run"]:
+        await grinder_off("shutting down")  # never leave the grinder running
+    if analyzer:
+        analyzer.save()
 
 
 app = web.Application()
@@ -1081,7 +1678,23 @@ app.router.add_post("/api/schedule", api_schedule_set)
 app.router.add_get("/api/stock", api_stock)
 app.router.add_post("/api/stock/log", api_stock_log)
 app.router.add_post("/api/stock/{item}", api_stock_change)
+app.router.add_get("/settings", settings_page)
+app.router.add_get("/api/settings", api_settings)
+app.router.add_post("/api/settings", api_settings_set)
+app.router.add_post("/api/plugs/test", api_plug_test)
+app.router.add_post("/api/plugs/scan", api_plug_scan)
+app.router.add_get("/api/grinder", api_grinder)
+app.router.add_post("/api/grinder/load", api_grinder_load)
+app.router.add_post("/api/grinder/grind", api_grinder_grind)
+app.router.add_post("/api/grinder/teach", api_grinder_teach)
+app.router.add_post("/api/grinder/stop", api_grinder_stop)
+app.router.add_post("/api/grinder/clear", api_grinder_clear)
+app.router.add_get("/api/power", api_power)
+app.router.add_get("/api/maintenance", api_maintenance)
+if plugs.SIM:
+    app.router.add_post("/api/sim/pump", api_sim_pump)
 app.on_startup.append(start_bg)
+app.on_shutdown.append(stop_bg)
 
 if __name__ == "__main__":
     web.run_app(app, port=8080, access_log=None)
