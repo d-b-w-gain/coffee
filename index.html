@@ -148,6 +148,42 @@
   .tl-events .off { color:var(--off); font-weight:600; min-width:2.2em; }
   .times .x { flex:none; width:36px; padding:7px 0; border-radius:8px; border:1px solid var(--line);
               background:transparent; color:var(--muted); }
+
+  /* Grinder: the Mazzer Mini ("The Mystery Mocha"), single-dose modded. */
+  .grinder { padding:0; overflow:hidden; }
+  .grinder[hidden] { display:none; }
+  .grind-svg { display:block; width:min(250px, 62%); height:auto; margin:0 auto; }
+  .grind-svg .tape { font:400 15px "Permanent Marker", "Marker Felt", "Comic Sans MS", cursive; fill:#1d1a17; }
+  .grind-svg .tag { font:700 11px system-ui, sans-serif; fill:#3b2a12; }
+  .g-beans, .g-grounds, .g-fall, .g-tag { opacity:0; transition:opacity .4s; }
+  .grinder.loaded .g-beans, .grinder.loaded .g-tag, .grinder.grinding .g-beans { opacity:1; }
+  .grinder.ground .g-grounds, .grinder.grinding .g-grounds { opacity:1; }
+  .grinder.grinding .g-fall { opacity:1; }
+  .grinder.grinding .g-body { animation:rumble .09s linear infinite; }
+  .grinder.grinding .g-beans { animation:drain var(--grind, 15s) linear forwards; transform-origin:150px 104px; }
+  .grinder.grinding .g-grounds { animation:fill var(--grind, 15s) ease-out forwards; transform-origin:150px 352px; }
+  .g-fall line { animation:fall .45s linear infinite; }
+  .g-fall line:nth-child(2) { animation-delay:.15s; } .g-fall line:nth-child(3) { animation-delay:.3s; }
+  @keyframes rumble { 0%,100% { transform:translate(0,0); } 25% { transform:translate(.8px,-.5px); } 50% { transform:translate(-.6px,.4px); } 75% { transform:translate(.4px,.6px); } }
+  @keyframes drain { from { transform:scaleY(1); } to { transform:scaleY(.05); } }
+  @keyframes fill { from { transform:scaleY(.1); } to { transform:scaleY(1); } }
+  @keyframes fall { from { transform:translateY(-8px); opacity:1; } to { transform:translateY(22px); opacity:.2; } }
+  .g-shell { opacity:.9; transition:opacity .4s; }
+  .grinder.loaded .g-shell, .grinder.grinding .g-shell { opacity:.3; }
+  .grinder.unknown .grind-svg { filter:grayscale(.7); opacity:.8; }
+  .beanpick { display:flex; gap:6px; margin-top:10px; }
+  .beanpick button { flex:1; padding:8px 0; font-size:13px; border-radius:8px; border:1px solid var(--line);
+                     background:transparent; color:var(--fg); }
+  .beanpick button[aria-pressed=true] { background:var(--brew); border-color:var(--brew); color:#fff; }
+  .gctl { padding:14px 20px 16px; }
+  .gctl .row { margin-top:10px; }
+  #g-state { font-size:18px; font-weight:600; }
+  #g-sub { color:var(--muted); font-size:14px; min-height:1.3em; }
+  .hint { background:#ffd34a26; border:1px solid #e0b324; border-radius:10px; padding:8px 10px; font-size:14px; margin-top:10px; }
+  .hint[hidden] { display:none; }
+  .stop { background:var(--off); }
+  .footer { font-size:14px; }
+  .footer a { color:var(--muted); }
 </style>
 </head>
 <body>
@@ -363,10 +399,132 @@
       <dt>Boiler</dt><dd>2 L</dd>
       <dt>Power</dt><dd>1500&nbsp;W · 240&nbsp;V · 50–60&nbsp;Hz · 6.5&nbsp;A</dd>
       <dt>Warm-up</dt><dd>about <span id="warmup-min">20</span> min from cold (estimate)</dd>
-      <dt>Smart plug</dt><dd>Tapo P100 (10 A max), 192.168.88.10</dd>
+      <dt>Smart plug</dt><dd id="plug-line">Tapo P100 (10 A max), 192.168.88.10</dd>
       <dt>Switch</dt><dd>Leave the orange rocker on. The app switches the power at the plug.</dd>
     </dl>
   </details>
+</section>
+
+<section class="grinder unknown" id="grinder" hidden>
+  <div class="stage">
+    <svg class="grind-svg" viewBox="0 0 300 500" role="img" aria-label="Mazzer Mini grinder, single-dose modded">
+      <defs>
+        <linearGradient id="g-silver" x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0" stop-color="#9ea3a8"/><stop offset=".18" stop-color="#d8dbde"/><stop offset=".55" stop-color="#c3c7cb"/><stop offset="1" stop-color="#8f9499"/>
+        </linearGradient>
+        <linearGradient id="g-chrome" x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0" stop-color="#7f8489"/><stop offset=".3" stop-color="#f2f3f4"/><stop offset=".6" stop-color="#a7abaf"/><stop offset="1" stop-color="#e3e5e7"/>
+        </linearGradient>
+        <linearGradient id="g-yellow" x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0" stop-color="#a9ad1c"/><stop offset=".35" stop-color="#dfe24a"/><stop offset="1" stop-color="#9da11a"/>
+        </linearGradient>
+        <linearGradient id="g-blue" x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0" stop-color="#1b2f74"/><stop offset=".4" stop-color="#3f63c9"/><stop offset="1" stop-color="#16285f"/>
+        </linearGradient>
+        <linearGradient id="g-lime" x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0" stop-color="#3fae1f"/><stop offset=".3" stop-color="#7cf04a"/><stop offset="1" stop-color="#38a01a"/>
+        </linearGradient>
+        <linearGradient id="g-spout" x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0" stop-color="#4dc22a"/><stop offset=".45" stop-color="#9dff6a"/><stop offset="1" stop-color="#47b526"/>
+        </linearGradient>
+        <pattern id="g-layers" width="10" height="3" patternUnits="userSpaceOnUse"><rect width="10" height="1" fill="#6e7010" opacity=".35"/></pattern>
+        <pattern id="g-knurl" width="4" height="10" patternUnits="userSpaceOnUse"><rect width="1.6" height="10" fill="#5d6166" opacity=".55"/></pattern>
+        <radialGradient id="g-bean" cx=".4" cy=".35" r=".8"><stop offset="0" stop-color="#8a5a2b"/><stop offset="1" stop-color="#3e230f"/></radialGradient>
+        <clipPath id="g-hopper"><rect x="106" y="20" width="88" height="88" rx="6"/></clipPath>
+        <clipPath id="g-cupclip"><path d="M126 316 h48 l-5 38 h-38 z"/></clipPath>
+      </defs>
+
+      <ellipse cx="150" cy="486" rx="110" ry="8" fill="#000" opacity=".18"/>
+      <g class="g-body">
+        <!-- single-dose hopper (3D-printed, yellow) with beans when loaded -->
+        <g class="g-beans" clip-path="url(#g-hopper)">
+          <g fill="url(#g-bean)" stroke="#2a160a" stroke-width=".8">
+            <ellipse cx="124" cy="100" rx="7" ry="5"/><ellipse cx="139" cy="102" rx="7" ry="5" transform="rotate(20 139 102)"/>
+            <ellipse cx="155" cy="100" rx="7" ry="5" transform="rotate(-15 155 100)"/><ellipse cx="171" cy="101" rx="7" ry="5"/>
+            <ellipse cx="184" cy="100" rx="6" ry="5" transform="rotate(30 184 100)"/>
+            <ellipse cx="131" cy="91" rx="7" ry="5" transform="rotate(-25 131 91)"/><ellipse cx="147" cy="90" rx="7" ry="5"/>
+            <ellipse cx="163" cy="90" rx="7" ry="5" transform="rotate(25 163 90)"/><ellipse cx="178" cy="91" rx="7" ry="5"/>
+            <ellipse cx="139" cy="81" rx="7" ry="5" transform="rotate(10 139 81)"/><ellipse cx="156" cy="80" rx="7" ry="5" transform="rotate(-20 156 80)"/>
+            <ellipse cx="171" cy="81" rx="6" ry="5"/>
+          </g>
+        </g>
+        <rect x="106" y="20" width="88" height="88" rx="6" fill="url(#g-yellow)" class="g-shell"/>
+        <rect x="106" y="20" width="88" height="88" rx="6" fill="url(#g-layers)"/>
+        <ellipse cx="150" cy="21" rx="44" ry="6" fill="#e7ea5c" stroke="#9da11a"/>
+        <!-- blue collar + o-rings -->
+        <rect x="88" y="104" width="124" height="14" rx="4" fill="url(#g-blue)"/>
+        <rect x="96" y="117" width="108" height="5" fill="#111"/>
+        <rect x="96" y="123" width="108" height="4" fill="#111" opacity=".85"/>
+        <rect x="112" y="127" width="76" height="16" fill="url(#g-chrome)"/>
+        <!-- knurled grind-adjustment ring + lever -->
+        <path d="M232 146 L272 136" stroke="#8c9196" stroke-width="5" stroke-linecap="round"/>
+        <rect x="258" y="128" width="34" height="15" rx="7" fill="#151515" transform="rotate(-14 275 135)"/>
+        <rect x="64" y="142" width="172" height="24" rx="4" fill="url(#g-chrome)"/>
+        <rect x="64" y="142" width="172" height="24" rx="4" fill="url(#g-knurl)"/>
+        <circle cx="96" cy="154" r="2.5" fill="#444"/><circle cx="205" cy="154" r="2.5" fill="#444"/>
+        <!-- body -->
+        <path d="M72 168 H228 L238 466 H62 Z" fill="url(#g-silver)"/>
+        <path d="M72 168 L94 206 M228 168 L206 206" stroke="#7d8287" stroke-width="2" fill="none"/>
+        <path d="M94 206 H206" stroke="#e8eaec" stroke-width="2"/>
+        <!-- 3D-printed lime front panel with the chute -->
+        <rect x="94" y="208" width="112" height="150" rx="6" fill="url(#g-lime)"/>
+        <rect x="94" y="208" width="112" height="150" rx="6" fill="none" stroke="#2e7d17" stroke-width="2"/>
+        <rect x="100" y="340" width="100" height="14" rx="3" fill="#2f8f17" opacity=".55"/>
+        <g fill="#cfd3d6" stroke="#555" stroke-width="1"><circle cx="106" cy="226" r="5"/><circle cx="194" cy="226" r="5"/></g>
+        <path d="M103 226h6M106 223v6M191 226h6M194 223v6" stroke="#555" stroke-width="1.3"/>
+        <path d="M134 226 Q150 214 166 226 L162 300 Q150 308 138 300 Z" fill="url(#g-spout)" stroke="#2e7d17" stroke-width="1.5"/>
+        <ellipse cx="150" cy="301" rx="12" ry="4" fill="#1d4d0e"/>
+        <!-- grounds falling while grinding -->
+        <g class="g-fall" stroke="#5a3417" stroke-width="3" stroke-linecap="round">
+          <line x1="146" y1="306" x2="146" y2="312"/><line x1="150" y1="304" x2="150" y2="311"/><line x1="154" y1="306" x2="154" y2="312"/>
+        </g>
+        <!-- the dosing cup under the chute, grounds in it -->
+        <g>
+          <g clip-path="url(#g-cupclip)"><g class="g-grounds"><rect x="126" y="330" width="48" height="26" fill="#4a2a12"/>
+            <ellipse cx="150" cy="331" rx="22" ry="6" fill="#6b4020"/></g></g>
+          <path d="M126 316 h48 l-5 38 h-38 z" fill="url(#g-chrome)" opacity=".55" stroke="#6d7277"/>
+          <ellipse cx="150" cy="316" rx="24" ry="4" fill="none" stroke="#6d7277"/>
+          <path d="M174 324 q14 2 10 16 q-3 6 -12 5" fill="none" stroke="#8c9196" stroke-width="3"/>
+        </g>
+        <!-- tape label -->
+        <g transform="rotate(-1.5 150 384)">
+          <rect x="70" y="370" width="164" height="28" rx="2" fill="#eadcae"/>
+          <text x="152" y="390" text-anchor="middle" class="tape">THE MYSTERY MOCHA</text>
+        </g>
+        <!-- side switch knobs, old doser-fork bracket, base -->
+        <rect x="50" y="402" width="16" height="24" rx="5" fill="#141414"/>
+        <rect x="234" y="402" width="16" height="24" rx="5" fill="#141414"/>
+        <rect x="128" y="418" width="44" height="22" rx="2" fill="url(#g-chrome)"/>
+        <circle cx="138" cy="428" r="2.5" fill="#555"/><circle cx="162" cy="428" r="2.5" fill="#555"/>
+        <rect x="62" y="462" width="176" height="14" rx="3" fill="#b8bcc0"/>
+        <rect x="74" y="474" width="22" height="8" rx="2" fill="#1b1b1b"/><rect x="204" y="474" width="22" height="8" rx="2" fill="#1b1b1b"/>
+        <!-- dose tag hanging off the lever -->
+        <g class="g-tag">
+          <path d="M282 140 L282 158" stroke="#8a6d3b" stroke-width="1.2"/>
+          <rect x="246" y="158" width="52" height="30" rx="4" fill="#f6e7b4" stroke="#b8963f"/>
+          <text x="272" y="171" text-anchor="middle" class="tag" id="g-tag1">18 g</text>
+          <text x="272" y="183" text-anchor="middle" class="tag" id="g-tag2">Regular</text>
+        </g>
+      </g>
+    </svg>
+    <div class="badge" id="g-badge">…</div>
+  </div>
+  <div class="gctl">
+    <div class="model">Mazzer Mini · single dose</div>
+    <div id="g-state">…</div>
+    <div id="g-sub"></div>
+    <div class="beanpick" id="g-beans" role="group" aria-label="Beans in the dose"></div>
+    <div class="row">
+      <button class="big brew" id="g-load" onclick="loadDose()">I’ve loaded a dose</button>
+      <button class="big brew" id="g-grind" onclick="grindNow()">Grind</button>
+    </div>
+    <div class="hint" id="g-hint" hidden>Plug’s off. Turn the grinder’s own switch <b>on</b> now; coffee.lan switches it from here.</div>
+    <div class="row" style="margin-top:8px">
+      <button class="small" id="g-clear" type="button" onclick="clearDose()">Empty / clear dose</button>
+      <a class="small" href="settings#grinder" style="text-align:center;text-decoration:none;padding-top:7px">Tuning ⚙️</a>
+    </div>
+    <div class="err" id="g-err"></div>
+  </div>
 </section>
 
 <section>
@@ -416,6 +574,8 @@
   <div class="row"><button class="small" onclick="logCoffee()">Made one without an order? Log it</button></div>
   <div class="err" id="stockmsg"></div>
 </section>
+
+<div class="footer"><a href="settings">⚙️ Settings · plugs, grinder, power &amp; maintenance</a></div>
 
 <script>
 const FIELDS = ['drink', 'size', 'milk', 'beans', 'shots', 'sugar', 'cup'];
@@ -561,7 +721,10 @@ function show(s) {
       ? `on until ${s.scheduled_until} (schedule)`
     : s.on && s.seconds_left != null ? `turns off in ${Math.ceil(s.seconds_left / 60)} min`
     : !s.on && s.next_scheduled ? `scheduled on ${s.next_scheduled}` : '';
+  if (s.on && s.watts != null) $('left').textContent += ($('left').textContent ? ' · ' : '') + `${s.watts.toLocaleString()} W now`;
+  if (s.plug) $('plug-line').textContent = `${s.plug_model || s.plug.driver} · ${s.plug.host || 'not set'}`;
   $('err').textContent = s.error || '';
+  showGrinder(s.grinder);
 }
 async function poll() { try { show(await (await fetch('api/status')).json()); } catch {} }
 async function toggle() {
@@ -854,6 +1017,70 @@ function renderCase(c) {
   $('case').replaceChildren(...tiles);
 }
 async function loadCase() { try { renderCase(await (await fetch('api/casefile')).json()); } catch {} }
+
+// ---- grinder (single dosing) --------------------------------------------
+let G = null, gBeans = 'Regular', gFast = null;
+function buildBeanPick() {
+  const box = $('g-beans'); box.innerHTML = '';
+  for (const b of ['Regular', 'Decaf', 'Half & half']) {
+    const btn = document.createElement('button'); btn.type = 'button'; btn.textContent = b;
+    btn.setAttribute('aria-pressed', String(b === gBeans));
+    btn.onclick = () => { gBeans = b; buildBeanPick(); };
+    box.append(btn);
+  }
+}
+function showGrinder(g) {
+  if (!g) return;
+  G = g;
+  const sec = $('grinder');
+  sec.hidden = !g.enabled;
+  if (!g.enabled) return;
+  const d = g.dose, run = g.run;
+  const grinding = !!run, ground = d && d.status === 'ground', loaded = d && d.status === 'loaded';
+  sec.classList.toggle('unknown', g.on === null);
+  sec.classList.toggle('grinding', grinding);
+  sec.classList.toggle('loaded', !!loaded && !grinding);
+  sec.classList.toggle('ground', !!ground && !grinding);
+  if (grinding) sec.style.setProperty('--grind', Math.max(1, run.of - run.seconds) + 's');
+  if (d) { $('g-tag1').textContent = `${d.grams} g`; $('g-tag2').textContent = d.beans === 'Half & half' ? '½ & ½' : d.beans; }
+  $('g-badge').textContent = g.on === null ? 'offline' : grinding ? `GRINDING ${Math.floor(run.seconds)}/${Math.round(run.of)} s` : g.on ? 'ON' : 'OFF';
+  $('g-state').textContent = g.on === null ? 'Grinder plug unreachable'
+    : grinding ? (run.why === 'teach' ? 'Timing a grind… press Stop when it’s empty' : `Grinding ${d ? d.beans.toLowerCase() : ''}…`)
+    : ground ? `Ground ${d.beans.toLowerCase()} · in the cup ☕`
+    : loaded ? `${d.beans} · ${d.grams} g loaded`
+    : 'Empty · load a dose';
+  $('g-sub').textContent = grinding ? `${Math.floor(run.seconds)} of ${Math.round(run.of)} s`
+    : g.rest_s > 0 ? `Resting ${g.rest_s} s (motor: 50 s on / 50 s off)`
+    : loaded && g.grind_s ? `Grinds for ${g.grind_s} s` : loaded ? 'Time a grind in Tuning first' : '';
+  $('g-load').hidden = grinding;
+  $('g-grind').textContent = grinding ? 'Stop' : 'Grind';
+  $('g-grind').classList.toggle('stop', grinding);
+  $('g-grind').disabled = !grinding && (!loaded || !g.grind_s || g.rest_s > 0 || g.on === null);
+  $('g-clear').disabled = grinding || !d;
+  $('g-err').textContent = g.error || '';
+  // poll quickly while something is happening
+  const busy = grinding || g.rest_s > 0;
+  if (busy && !gFast) gFast = setInterval(loadGrinder, 1000);
+  if (!busy && gFast) { clearInterval(gFast); gFast = null; }
+}
+async function gPost(path, body) {
+  $('g-err').textContent = '';
+  try {
+    const r = await fetch('api/grinder/' + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+    const g = await r.json(); showGrinder(g);
+    if (!r.ok) $('g-err').textContent = g.error || 'That didn’t work';
+    return r.ok ? g : null;
+  } catch { $('g-err').textContent = 'Couldn’t reach the server.'; return null; }
+}
+async function loadGrinder() { try { showGrinder(await (await fetch('api/grinder')).json()); } catch {} }
+async function loadDose() {
+  const g = await gPost('load', { beans: gBeans });
+  $('g-hint').hidden = !g;
+  if (g) setTimeout(() => { $('g-hint').hidden = true; }, 60000);
+}
+async function grindNow() { $('g-hint').hidden = true; await gPost(G && G.run ? 'stop' : 'grind'); }
+async function clearDose() { await gPost('clear'); }
+buildBeanPick();
 
 trackMine(); poll(); loadStock(); loadSchedule(); loadHistory(); loadCase();
 setInterval(loadCase, 60000);

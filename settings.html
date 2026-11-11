@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Coffee settings</title>
+<style>
+  :root { --bg:#f6f1ea; --fg:#2b211b; --muted:#7a6a5e; --on:#2f7d4f; --off:#a23b2a; --brew:#8a5a2b;
+          --card:#fff; --line:#d9cfc6; --bar:#e9e1d8; --heat:#e0702a; --pump:#2f6fd0; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#1b1613; --fg:#f1e7dd; --muted:#a8968a; --card:#26201c; --line:#4a3f38; --brew:#b07a45; --bar:#3a312b; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.4 system-ui, sans-serif;
+         display:flex; flex-direction:column; align-items:center; gap:16px; padding:24px 16px; }
+  section { background:var(--card); padding:20px; border-radius:16px; width:min(520px, 100%); box-shadow:0 4px 20px #0002; }
+  h1 { margin:0; font-size:22px; }
+  h2 { margin:0 0 6px; font-size:19px; }
+  h3 { margin:16px 0 4px; font-size:15px; }
+  a { color:var(--brew); }
+  .muted { color:var(--muted); font-size:14px; }
+  .err { color:var(--off); font-size:14px; min-height:1.3em; margin-top:6px; }
+  .ok { color:var(--on); }
+  label { display:block; font-size:13px; color:var(--muted); margin:10px 0 4px; }
+  select, input[type=text], input[type=number] { font:inherit; padding:9px 10px; border-radius:10px; border:1px solid var(--line);
+         background:transparent; color:inherit; width:100%; min-width:0; }
+  select option { color:#000; }
+  button { font:inherit; cursor:pointer; }
+  .btn { padding:9px 14px; border-radius:10px; border:1px solid var(--line); background:transparent; color:var(--fg); font-size:14px; }
+  .btn.main { background:var(--brew); border-color:var(--brew); color:#fff; font-weight:600; }
+  .btn.stop { background:var(--off); border-color:var(--off); color:#fff; }
+  .btn:disabled { opacity:.5; cursor:default; }
+  .row { display:flex; gap:8px; align-items:center; margin-top:10px; flex-wrap:wrap; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:0 10px; }
+  .modes { display:flex; flex-direction:column; gap:8px; margin-top:8px; }
+  .modes label { display:flex; gap:10px; align-items:center; margin:0; color:var(--fg); font-size:15px;
+                 border:1px solid var(--line); border-radius:12px; padding:10px 12px; }
+  .plug { border:1px solid var(--line); border-radius:12px; padding:10px 12px; margin-top:10px; }
+  .plug .grid { display:grid; grid-template-columns:1.1fr 1fr auto; gap:8px; align-items:end; }
+  .plug .grid label { margin-top:0; }
+  .res { font-size:13px; margin-top:6px; min-height:1.2em; }
+  .found { list-style:none; padding:0; margin:8px 0 0; font-size:14px; }
+  .found li { display:flex; justify-content:space-between; align-items:center; gap:8px; padding:6px 0; border-top:1px solid var(--line); }
+  .found li span { min-width:0; }
+  .check { display:flex; gap:8px; align-items:flex-start; margin-top:10px; font-size:15px; color:var(--fg); }
+  .check input { margin-top:4px; }
+  .beanrow { display:grid; grid-template-columns:1fr 92px auto; gap:8px; align-items:center; margin-top:6px; }
+  .beanrow b { font-weight:600; font-size:15px; }
+  .stats { display:grid; grid-template-columns:repeat(3, 1fr); gap:8px; margin-top:10px; }
+  .stats div { border:1px solid var(--line); border-radius:10px; padding:8px 10px; }
+  .stats b { display:block; font-size:18px; }
+  .stats span { color:var(--muted); font-size:12px; }
+  .chart { width:100%; height:180px; display:block; background:var(--bar); border-radius:10px; margin-top:8px; }
+  .legend { display:flex; gap:14px; font-size:13px; color:var(--muted); margin-top:6px; flex-wrap:wrap; }
+  .legend i { display:inline-block; width:12px; height:3px; vertical-align:middle; margin-right:4px; }
+  .now { font-size:15px; margin-top:8px; }
+  .trend { border:1px solid var(--line); border-radius:10px; padding:8px 12px; margin-top:8px; font-size:14px; }
+  .trend.flag { border-color:var(--off); }
+  .trend b { font-weight:600; }
+  .tablewrap { overflow-x:auto; margin-top:8px; }
+  table { border-collapse:collapse; font-size:13px; width:100%; white-space:nowrap; }
+  th, td { padding:4px 6px; text-align:right; border-bottom:1px solid var(--line); }
+  th:first-child, td:first-child { text-align:left; }
+  th { color:var(--muted); font-weight:600; }
+  .save { position:sticky; bottom:12px; width:min(520px, 100%); display:flex; gap:10px; align-items:center;
+          background:var(--card); border-radius:14px; padding:10px 14px; box-shadow:0 4px 20px #0003; }
+  .save .msg { flex:1; font-size:14px; }
+</style>
+</head>
+<body>
+<section>
+  <h1>⚙️ Settings</h1>
+  <div class="muted"><a href="./">← Back to coffee</a></div>
+</section>
+
+<section>
+  <h2>What coffee.lan controls</h2>
+  <div class="modes" id="modes"></div>
+</section>
+
+<section>
+  <h2>Smart plugs</h2>
+  <div class="muted">Tapo and Kasa (TP-Link), Shelly and Tasmota plugs work directly. Tapo plugs need “Third-Party Compatibility” turned on in the Tapo app.
+    A plug that measures power (like the Tapo P110) on the machine adds the power trace, measured warm-ups and maintenance numbers below.</div>
+  <div class="plug" id="plug-machine"></div>
+  <div class="plug" id="plug-grinder"></div>
+  <div class="row">
+    <button class="btn" type="button" id="scan" onclick="scan()">🔎 Find plugs on the network</button>
+    <span class="muted" id="scan-msg"></span>
+  </div>
+  <ul class="found" id="found"></ul>
+</section>
+
+<section id="grinder">
+  <h2>Grinder · Mazzer Mini</h2>
+  <div class="muted">Single dosing: load a dose with the cup under the chute and tap “I’ve loaded a dose” (the plug switches off so you can turn the grinder’s own switch on). Each grind then runs for the timed grind plus a little extra.
+    The motor is rated <b>50 s on / 50 s off</b>, so no run is longer than that and each is followed by an equal rest.</div>
+  <h3>Grind times</h3>
+  <div class="muted">Load a dose, press <b>Time it</b>, and press <b>Stop</b> the moment it runs empty. Half &amp; half and decaf use the regular time until they have their own.</div>
+  <div id="beanrows"></div>
+  <div class="grid2">
+    <div><label for="extra_s">Extra seconds on every grind</label><input type="number" id="extra_s" min="0" max="15" step="0.5"></div>
+    <div><label for="dose_g">Dose (g)</label><input type="number" id="dose_g" min="5" max="30" step="0.5"></div>
+    <div><label for="max_run_s">Longest run (s, plate max 50)</label><input type="number" id="max_run_s" min="5" max="50" step="1"></div>
+    <div><label for="on_match">When an order matches the loaded dose</label>
+      <select id="on_match"><option value="notify">Tell me (flagged message)</option><option value="grind">Grind it straight away</option></select></div>
+  </div>
+  <label class="check"><input type="checkbox" id="call_on_match"> Phone me straight away through Spruik when an order matches the loaded dose (instead of after 5 minutes)</label>
+  <label class="check"><input type="checkbox" id="backstop"> Also set the plug’s own auto-off as a backstop, in case coffee.lan stops mid-grind <span class="muted" id="backstop-st"></span></label>
+  <div class="stats" id="gstats"></div>
+  <div class="err" id="g-err"></div>
+</section>
+
+<section id="power">
+  <h2>Machine power</h2>
+  <div class="muted" id="power-hint">Needs a plug that measures power on the machine.</div>
+  <svg class="chart" id="chart" viewBox="0 0 500 180" preserveAspectRatio="none" role="img" aria-label="Machine power, last 10 minutes"></svg>
+  <div class="legend"><span><i style="background:var(--brew)"></i>watts</span><span><i style="background:var(--heat)"></i>heater threshold</span></div>
+  <div class="now" id="pnow"></div>
+  <div class="muted" style="margin-top:6px">Pull a shot and watch the trace: the heater is the big step, the pump a smaller one on top. Set the thresholds between what you see.</div>
+  <div class="grid2">
+    <div><label for="heater_w">Heater above (W)</label><input type="number" id="heater_w" min="100" max="3000" step="10"></div>
+    <div><label for="pump_w">Pump step at least (W)</label><input type="number" id="pump_w" min="10" max="1000" step="5"></div>
+    <div><label for="warmup_min">Warm-up estimate (min)</label><input type="number" id="warmup_min" min="1" max="90" step="1"></div>
+    <div><label for="sample_s">Read power every (s)</label><input type="number" id="sample_s" min="1" max="30" step="1"></div>
+  </div>
+  <div class="muted" style="margin-top:6px">With a power-measuring plug, “ready” comes from the heater’s first cut-out, and the estimate becomes the typical measured warm-up.</div>
+</section>
+
+<section id="maint">
+  <h2>Maintenance</h2>
+  <div class="muted">Daily numbers from the plugs. After a few weeks, slow drifts get flagged: heater drawing less (ageing element), longer warm-ups (scale), pump working harder or longer (scale, choked jet, vane wear), grinder working harder (dull burrs, needs a power-measuring plug on the grinder).</div>
+  <div id="trends"></div>
+  <div class="tablewrap"><table id="days"></table></div>
+</section>
+
+<div class="save">
+  <span class="msg" id="save-msg"></span>
+  <button class="btn main" type="button" id="save" onclick="save()">Save settings</button>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let S = null, dirty = false;
+const ROLES = { machine: 'Espresso machine', grinder: 'Grinder' };
+
+function el(tag, attrs = {}, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) if (k === 'class') e.className = v; else if (k.startsWith('on')) e[k] = v; else e.setAttribute(k, v);
+  e.append(...kids); return e;
+}
+function markDirty() { dirty = true; $('save-msg').textContent = 'Unsaved changes'; $('save-msg').className = 'msg'; }
+
+function renderModes() {
+  const box = $('modes'); box.innerHTML = '';
+  for (const [k, name] of Object.entries(S.modes)) {
+    const r = el('input', { type: 'radio', name: 'mode', value: k });
+    r.checked = S.mode === k; r.onchange = () => { S.mode = k; markDirty(); renderPlugs(); };
+    box.append(el('label', {}, r, name + (k === 'machine' ? ' (the grinder is switched by hand)' : '')));
+  }
+}
+
+function renderPlugs() {
+  for (const role of ['machine', 'grinder']) {
+    const box = $('plug-' + role); box.innerHTML = '';
+    const p = S.plugs[role];
+    const sel = el('select', { id: role + '-driver' });
+    for (const [k, name] of Object.entries(S.drivers)) sel.add(new Option(name, k, false, p.driver === k));
+    sel.onchange = () => { p.driver = sel.value; markDirty(); };
+    const host = el('input', { type: 'text', id: role + '-host', placeholder: '192.168.88.x', value: p.host || '' });
+    host.oninput = () => { p.host = host.value.trim(); markDirty(); };
+    const res = el('div', { class: 'res', id: role + '-res' });
+    const live = S.live[role];
+    if (live) res.textContent = describePlug(live);
+    const test = el('button', { class: 'btn', type: 'button', onclick: () => testPlug(role) }, 'Test');
+    box.append(el('b', {}, ROLES[role]),
+      role === 'grinder' && S.mode !== 'machine+grinder' ? el('span', { class: 'muted' }, ' · not used in “machine only” mode') : '',
+      el('div', { class: 'grid' },
+        el('div', {}, el('label', { for: role + '-driver' }, 'Type'), sel),
+        el('div', {}, el('label', { for: role + '-host' }, 'Address'), host), test), res);
+  }
+}
+function describePlug(i) {
+  return `✅ ${i.model || i.driver} · ${i.on === null ? '?' : i.on ? 'on' : 'off'}` +
+    (i.metered ? ` · measures power${i.watts != null ? ` (${i.watts} W now)` : ''}` : ' · no power measuring');
+}
+async function testPlug(role) {
+  const res = $(role + '-res'); res.textContent = 'Testing…'; res.className = 'res';
+  try {
+    const r = await fetch('api/plugs/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(S.plugs[role]) });
+    const j = await r.json();
+    if (j.ok) { res.textContent = describePlug(j); res.className = 'res ok'; }
+    else { res.textContent = '❌ ' + (j.error || 'no answer'); res.className = 'res err'; }
+  } catch { res.textContent = '❌ Couldn’t reach coffee.lan'; res.className = 'res err'; }
+}
+async function scan() {
+  $('scan').disabled = true; $('scan-msg').textContent = `Looking on ${S.scan_subnet}… (a few seconds)`; $('found').innerHTML = '';
+  try {
+    const r = await fetch('api/plugs/scan', { method: 'POST' }); const j = await r.json();
+    if (!r.ok) throw new Error(j.error);
+    $('scan-msg').textContent = j.found.length ? `Found ${j.found.length} on ${j.subnet}` : `Nothing found on ${j.subnet}. Type the plug’s address instead (its IP is in the router or the plug’s app).`;
+    for (const f of j.found) {
+      const li = el('li', {}, el('span', {}, el('b', {}, f.model), ` · ${f.host} · ${S.drivers[f.driver] || f.driver}`, f.name ? ` · ${f.name}` : '',
+        f.role ? el('span', { class: 'muted' }, ` (the ${f.role} now)`) : ''));
+      const acts = el('span', { class: 'row', style: 'margin:0;flex-wrap:nowrap' });
+      for (const role of ['machine', 'grinder']) acts.append(el('button', { class: 'btn', type: 'button', onclick: () => {
+        S.plugs[role] = { driver: f.driver, host: f.host }; markDirty(); renderPlugs(); testPlug(role); } }, 'Use for ' + role));
+      li.append(acts); $('found').append(li);
+    }
+  } catch (e) { $('scan-msg').textContent = 'Scan failed: ' + (e.message || e); }
+  $('scan').disabled = false;
+}
+
+// ---- grinder --------------------------------------------------------------
+let GV = null, teaching = null, gTimer = null;
+function renderGrinder() {
+  const g = S.grinder;
+  for (const k of ['extra_s', 'dose_g', 'max_run_s']) { $(k).value = g[k]; $(k).oninput = () => { g[k] = $(k).value; markDirty(); }; }
+  $('on_match').value = g.on_match; $('on_match').onchange = () => { g.on_match = $('on_match').value; markDirty(); };
+  for (const k of ['call_on_match', 'backstop']) { $(k).checked = g[k]; $(k).onchange = () => { g[k] = $(k).checked; markDirty(); }; }
+  const rows = $('beanrows'); rows.innerHTML = '';
+  for (const b of S.beans) {
+    const inp = el('input', { type: 'number', min: 1, max: 50, step: 0.1, value: g.grind_s[b] ?? '', placeholder: b === 'Regular' ? 'not timed' : 'regular', 'aria-label': `${b} grind seconds` });
+    inp.oninput = () => { g.grind_s[b] = inp.value === '' ? null : inp.value; markDirty(); };
+    const btn = el('button', { class: 'btn', type: 'button', id: 'teach-' + b, onclick: () => teach(b) }, 'Time it');
+    rows.append(el('div', { class: 'beanrow' }, el('b', {}, b), inp, btn));
+  }
+}
+function renderGrinderLive(v) {
+  GV = v;
+  $('backstop-st').textContent = v.backstop ? `(${v.backstop})` : '';
+  const t = v.totals;
+  $('gstats').innerHTML = '';
+  $('gstats').append(el('div', {}, el('b', {}, String(t.runs)), el('span', {}, 'grinder runs')),
+    el('div', {}, el('b', {}, `${Math.round(t.motor_s / 60)} min`), el('span', {}, 'motor time')),
+    el('div', {}, el('b', {}, `${(t.grams / 1000).toFixed(2)} kg`), el('span', {}, 'ground (doses)')));
+  const run = v.run;
+  for (const b of S.beans) {
+    const btn = $('teach-' + b); if (!btn) continue;
+    const mine = run && run.why === 'teach' && run.beans === b;
+    btn.textContent = mine ? `Stop · ${run.seconds.toFixed(1)} s` : 'Time it';
+    btn.className = 'btn' + (mine ? ' stop' : '');
+    btn.disabled = !v.enabled || (!!run && !mine) || (!run && v.rest_s > 0);
+  }
+  $('g-err').textContent = !v.enabled ? 'Turn on “Machine and grinder” and set the grinder’s plug (then save) to use these.'
+    : v.rest_s > 0 && !run ? `Resting ${v.rest_s} s` : (v.error || '');
+  const busy = run || v.rest_s > 0;
+  if (busy && !gTimer) gTimer = setInterval(loadGrinder, 500);
+  if (!busy && gTimer) { clearInterval(gTimer); gTimer = null; }
+}
+async function loadGrinder() { try { renderGrinderLive(await (await fetch('api/grinder')).json()); } catch {} }
+async function teach(beans) {
+  const stop = GV && GV.run && GV.run.why === 'teach';
+  const r = await fetch('api/grinder/' + (stop ? 'stop' : 'teach'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ beans }) });
+  const j = await r.json();
+  renderGrinderLive(j);
+  if (!r.ok) { $('g-err').textContent = j.error; return; }
+  const res = j.result;
+  if (stop && res) {
+    if (res.timed) { S.grinder.grind_s[beans] = res.timed; renderGrinder(); $('g-err').textContent = ''; $('save-msg').textContent = `${beans}: ${res.timed} s saved`; $('save-msg').className = 'msg ok'; }
+    else if (res.error) $('g-err').textContent = res.error;
+  }
+}
+
+// ---- machine power ----------------------------------------------------------
+function renderMachine() {
+  for (const k of ['heater_w', 'pump_w', 'warmup_min', 'sample_s']) { $(k).value = S.machine[k]; $(k).oninput = () => { S.machine[k] = $(k).value; markDirty(); }; }
+}
+async function loadPower() {
+  let p; try { p = await (await fetch('api/power?minutes=10')).json(); } catch { return; }
+  const svg = $('chart'), W = 500, H = 180, now = p.now, span = 600;
+  const pts = p.samples.filter(s => s[1] != null);
+  $('power-hint').textContent = p.metered ? 'Live, last 10 minutes.' : 'Needs a plug that measures power on the machine (a Tapo P110, Shelly Plug S or a Tasmota plug with energy monitoring). Nothing to show yet.';
+  const max = Math.max(200, p.heater_w * 1.4, ...pts.map(s => s[1])) * 1.05;
+  const x = t => W - (now - t) / span * W, y = w => H - w / max * H;
+  let html = '';
+  for (let w = 0; w < max; w += max > 2000 ? 500 : max > 800 ? 250 : 100) html += `<line x1="0" x2="${W}" y1="${y(w)}" y2="${y(w)}" stroke="currentColor" stroke-opacity=".12"/><text x="4" y="${y(w) - 2}" font-size="10" fill="currentColor" opacity=".55">${w} W</text>`;
+  html += `<line x1="0" x2="${W}" y1="${y(p.heater_w)}" y2="${y(p.heater_w)}" stroke="var(--heat)" stroke-dasharray="6 4"/>`;
+  if (pts.length > 1) html += `<polyline fill="none" stroke="var(--brew)" stroke-width="2" vector-effect="non-scaling-stroke" points="${pts.map(s => `${x(s[0]).toFixed(1)},${y(s[1]).toFixed(1)}`).join(' ')}"/>`;
+  svg.innerHTML = html;
+  const last = pts[pts.length - 1];
+  $('pnow').textContent = !p.metered ? '' : last ? `${Math.round(last[1]).toLocaleString()} W now · heater ${p.heater_on ? 'on 🔥' : 'off'} · pump ${p.pumping ? 'running 💧' : 'off'}` : 'Waiting for readings…';
+}
+
+// ---- maintenance ------------------------------------------------------------
+async function loadMaint() {
+  let m; try { m = await (await fetch('api/maintenance')).json(); } catch { return; }
+  const tr = $('trends'); tr.innerHTML = '';
+  if (!m.trends.length) tr.append(el('div', { class: 'muted', style: 'margin-top:8px' }, `Not enough days yet to compare (needs about 10 days of use). Typical warm-up: ${m.typical_warmup_min} min.`));
+  for (const t of m.trends) tr.append(el('div', { class: 'trend' + (t.flag ? ' flag' : '') },
+    el('b', {}, `${t.flag ? '⚠️ ' : '✅ '}${t.name}: `), `${t.now} ${t.unit} (was ${t.before} ${t.unit}, ${t.change_pct > 0 ? '+' : ''}${t.change_pct}%)`,
+    t.why ? el('div', { class: 'muted' }, t.why) : ''));
+  const cols = [['date', 'Day'], ['on_min', 'On min'], ['kwh', 'kWh'], ['warmup_min', 'Warm-up'], ['heater_w', 'Heater W'],
+                ['heater_duty', 'Duty %'], ['pump_runs', 'Pumps'], ['pump_w', 'Pump W'], ['pump_s_avg', 'Pump s'], ['grinds', 'Grinds'], ['grind_g', 'Ground g']];
+  const days = m.days.slice(-21).reverse();
+  $('days').innerHTML = days.length ? `<tr>${cols.map(c => `<th>${c[1]}</th>`).join('')}</tr>` +
+    days.map(d => `<tr>${cols.map(([k]) => `<td>${d[k] ?? '–'}</td>`).join('')}</tr>`).join('') : '<tr><td class="muted">No days recorded yet.</td></tr>';
+}
+
+async function load() {
+  S = await (await fetch('api/settings')).json();
+  renderModes(); renderPlugs(); renderGrinder(); renderMachine();
+  dirty = false; $('save-msg').textContent = '';
+}
+async function save() {
+  $('save').disabled = true;
+  const body = { mode: S.mode, plugs: S.plugs, machine: S.machine, grinder: S.grinder };
+  try {
+    const r = await fetch('api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const j = await r.json();
+    if (!r.ok) { $('save-msg').textContent = j.error || 'Not saved'; $('save-msg').className = 'msg err'; }
+    else { S = j; renderModes(); renderPlugs(); renderGrinder(); renderMachine(); dirty = false; $('save-msg').textContent = 'Saved ✓'; $('save-msg').className = 'msg ok'; loadGrinder(); }
+  } catch { $('save-msg').textContent = 'Couldn’t reach coffee.lan'; $('save-msg').className = 'msg err'; }
+  $('save').disabled = false;
+}
+window.addEventListener('beforeunload', e => { if (dirty) { e.preventDefault(); e.returnValue = ''; } });
+
+load().then(() => { loadGrinder(); loadPower(); loadMaint(); if (location.hash) document.querySelector(location.hash)?.scrollIntoView(); });
+setInterval(loadPower, 3000);
+setInterval(loadMaint, 60000);
+setInterval(loadGrinder, 5000);
+</script>
+</body>
+</html>

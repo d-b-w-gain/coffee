@@ -41,11 +41,34 @@ pages. It runs as a single pod on k3s.
 Privacy: order history lives in each browser (`localStorage`). The server keeps
 only active orders (up to 24 h) and anonymous totals.
 
+- **Grinder (optional).** In "Machine and grinder" mode a second plug runs the
+  grinder (a single-dose Mazzer Mini here). Load a dose and tap "I've loaded a
+  dose": the plug switches off so the grinder's own switch can be left on. Each
+  grind is then a timed run, using the grind time measured with "Time it" plus a
+  few extra seconds. No run is longer than the motor's rating (50 s on / 50 s
+  off), each run is followed by an equal rest, and a grinder found running
+  outside a run is switched off. The plug's own auto-off is set as a backstop.
+- **Order ↔ dose matching.** A new order is checked against the loaded dose.
+  A match flags the Signal message "🚨 READY TO GO", and can grind straight away
+  and have Spruik phone at once (both optional); a mismatch is warned about.
+- **Any common smart plug.** Tapo/Kasa (python-kasa), Shelly (Gen1 and Gen2+)
+  and Tasmota, each with Test and a network scan on the settings page.
+- **Power and maintenance.** With a plug that measures power on the machine
+  (Tapo P110, Shelly PM, Tasmota energy), watts are read every couple of
+  seconds while it's on. The heater (big step) and pump (smaller step on top)
+  are picked out, "ready" comes from the heater's first cut-out, and daily
+  numbers (energy, warm-up, heater watts and duty, pump runs and watts, grinder
+  runs and grams) are kept for a year. Drifts are flagged after a few weeks.
+
 ## Files
 
 | File | What |
 |---|---|
-| `app.py` | Server: plug control, schedule, orders, Signal, stock, ratings |
+| `app.py` | Server: machine and grinder control, settings, schedule, orders, Signal, stock, ratings |
+| `plugs.py` | Smart plug drivers (Tapo/Kasa, Shelly, Tasmota, simulated) and the network scan |
+| `power.py` | Power analysis: heater/pump detection, measured warm-up, daily maintenance numbers |
+| `settings.html` | Settings: mode, plugs, grinder tuning, live power trace, maintenance |
+| `tests/` | Offline tests with simulated plugs (see Testing) |
 | `index.html` | Main page: machine, order form, schedule, stock, case file |
 | `order.html` | Barista's page for one order (`/o/<id>`) |
 | `rate.html` | Drinker's rating page (`/r/<id>`) |
@@ -107,6 +130,12 @@ Disable any schedules in the Tapo app, because this app is the only scheduler.
 | `GIPHY_API_KEY` | — | GIFs in messages (secret `coffee-giphy`, optional) |
 | `BASKET_GRAMS` | 18 | Beans used per coffee |
 | `BASE_URL` | `http://coffee.lan` | Used in links sent over Signal |
+| `SETTINGS_FILE`, `GRINDER_FILE`, `MAINTENANCE_FILE` | `/data/…json` | Settings, grinder state, daily power numbers |
+| `SCAN_SUBNET` | from the plug addresses | /24 to search for plugs |
+| `COFFEE_SIM` | — | `1` offers simulated plugs (testing only) |
+
+`TAPO_HOST` only seeds the machine's plug; after that the settings page decides
+which plug does what.
 | `SCHEDULE_FILE`, `HISTORY_FILE`, `ORDERS_FILE`, `STOCK_FILE`, `CASEFILE` | `/data/…json` | State files (on the PVC) |
 
 ## API
@@ -126,7 +155,29 @@ Disable any schedules in the Tapo app, because this app is the only scheduler.
 | GET | `/api/stock` | Stock levels |
 | POST | `/api/stock/{item}`, `/api/stock/log` | Set stock / log a coffee made off-app |
 | GET | `/api/casefile` | Anonymous rating totals |
+| GET / POST | `/api/settings` | Mode, plugs, grinder and machine settings |
+| POST | `/api/plugs/test`, `/api/plugs/scan` | Try a plug; look for plugs on the network |
+| GET | `/api/grinder` | Grinder state: dose, run, rest, totals |
+| POST | `/api/grinder/load`, `/grind`, `/stop`, `/clear` | Single-dose workflow |
+| POST | `/api/grinder/teach` | Time a grind (stop it when empty) |
+| GET | `/api/power?minutes=10` | Live watts from a power-measuring plug |
+| GET | `/api/maintenance` | Daily numbers and trend flags |
 | GET | `/healthz` | Liveness |
+
+## Testing
+
+The tests run the app against simulated plugs and a fake Signal, in the image:
+
+```sh
+docker build -t coffee-dev .
+docker run --rm -v "$PWD:/app:ro" -v "$PWD/tests:/t:ro" -w /tmp coffee-dev python /t/grinder_order_test.py
+# the API walk-through needs a running server with COFFEE_SIM=1:
+docker run -d --name coffee-sim -e COFFEE_SIM=1 -e SETTINGS_FILE=/tmp/s.json -e GRINDER_FILE=/tmp/g.json \
+  -e MAINTENANCE_FILE=/tmp/m.json -e SCHEDULE_FILE=/tmp/sc.json -e HISTORY_FILE=/tmp/h.json \
+  -e ORDERS_FILE=/tmp/o.json -e STOCK_FILE=/tmp/st.json -e CASEFILE=/tmp/c.json \
+  -v "$PWD:/app:ro" -v "$PWD/tests:/t:ro" coffee-dev
+docker exec coffee-sim python /t/sim_api_test.py
+```
 
 ## Safety note
 
