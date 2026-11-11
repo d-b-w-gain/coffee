@@ -315,14 +315,22 @@ class TuyaPlug(Plug):
                     break  # nothing listening: trying other versions won't help
             raise RuntimeError(f"Tuya plug at {self.host}: {last}")
         dp = self.dps_map
-        # ask for fresh power readings first (most plugs only refresh them now and then)
+        # Ask for fresh power readings first (most plugs only refresh them now and then).
+        # The plug answers that on the same socket, possibly after we've asked for status,
+        # so a reply can hold only some data points: merge what comes back and keep
+        # reading until one includes the switch, or the on/off state would be stale.
         await asyncio.to_thread(self.dev.updatedps, [dp["current_ma"], dp["power_dw"], dp["voltage_dv"]], True)
-        reply = await asyncio.to_thread(self.dev.status)
-        err = None if isinstance(reply, dict) and "dps" in reply else (self._err(reply) or "no answer")
-        if err:
-            await self.close()
-            raise RuntimeError(f"Tuya plug at {self.host}: {err}")
-        return reply
+        merged = {}
+        for _ in range(3):
+            reply = await asyncio.to_thread(self.dev.status)
+            err = None if isinstance(reply, dict) and "dps" in reply else (self._err(reply) or "no answer")
+            if err:
+                await self.close()
+                raise RuntimeError(f"Tuya plug at {self.host}: {err}")
+            merged.update({str(k): v for k, v in reply["dps"].items()})
+            if str(dp["switch"]) in merged:
+                break
+        return {"dps": merged}
 
     async def _update(self):
         reply = await self._status()
@@ -334,6 +342,8 @@ class TuyaPlug(Plug):
         power = self.dps.get(dp["power_dw"])
         self.metered = power is not None
         self.watts = power / 10 if isinstance(power, (int, float)) else None
+        if self.is_on is False and self.metered:
+            self.watts = 0.0  # relay open: the plug's power reading lags a few seconds behind
         volts = self.dps.get(dp["voltage_dv"])
         self.volts = volts / 10 if isinstance(volts, (int, float)) and volts else None
 
@@ -341,11 +351,23 @@ class TuyaPlug(Plug):
         if self.dev is None:
             await self._update()
         dp = self.dps_map
-        reply = await asyncio.to_thread(self.dev.set_value, dp["switch"], bool(on))
-        err = self._err(reply) if isinstance(reply, dict) and "dps" not in reply else None
-        if err:
+        sw = str(dp["switch"])
+        last = "no answer"
+        for attempt in range(2):
+            # A fresh connection for every command: on a kept-open one, a reading the plug
+            # pushed earlier can be taken as the answer, and an idle connection the plug has
+            # dropped swallows the command without an error.
+            await asyncio.to_thread(self.dev.close)
+            reply = await asyncio.to_thread(self.dev.set_value, dp["switch"], bool(on))
+            got = reply.get("dps") if isinstance(reply, dict) and isinstance(reply.get("dps"), dict) else {}
+            got = {str(k): v for k, v in got.items()}
+            self.dps.update(got)
+            if sw in got and bool(got[sw]) == bool(on):
+                break  # the plug confirmed the new state
+            last = self._err(reply) or f"didn't confirm switching {'on' if on else 'off'}"
+        else:
             await self.close()
-            raise RuntimeError(f"Tuya plug at {self.host}: {err}")
+            raise RuntimeError(f"Tuya plug at {self.host}: {last}")
         if on and self.countdown_s and str(dp["countdown"]) in self.dps:
             # the plug's own countdown: switches itself off if coffee.lan doesn't
             await asyncio.to_thread(self.dev.set_value, dp["countdown"], int(self.countdown_s))
