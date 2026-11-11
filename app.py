@@ -30,7 +30,7 @@ from zoneinfo import ZoneInfo
 
 import aiohttp
 from aiohttp import web
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import plugs
 from power import Analyzer
@@ -1688,6 +1688,48 @@ async def api_sim_pump(req):
     return web.json_response({"ok": True})
 
 
+# --- One address -------------------------------------------------------------------
+# Browsers keep saved preferences per address, so coffee.lan and the https name were two
+# separate sets: someone's preset saved on one was missing on the other. Pages opened on
+# any other name go to the canonical address, carrying that browser's saved coffee
+# preferences in the #fragment (never sent to a server); the main page imports them once.
+# The API isn't redirected, so scripts calling coffee.lan/api keep working.
+CANONICAL = (os.environ.get("CANONICAL_URL") or (BASE_URL if BASE_URL.startswith("https://") else "")).rstrip("/")
+CANON_HOST = urlparse(CANONICAL).netloc if CANONICAL else ""
+PAGE_PATH = re.compile(r"^/(settings|o/[^/]+|r/[^/]+)?$")
+MOVE_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>Coffee</title></head>
+<body style="font:16px system-ui,sans-serif;background:#f6f1ea;color:#2b211b;text-align:center;padding:40px 16px">
+<p>Moving to <a id="go" href="">the coffee page</a>…</p>
+<script>
+const dest = __DEST__, carry = __CARRY__;
+let frag = location.hash.slice(1), data = {};
+try {
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (k && k.startsWith('coffee-')) data[k] = localStorage.getItem(k);
+  }
+} catch {}
+if (carry && Object.keys(data).length) {
+  const packed = btoa(unescape(encodeURIComponent(JSON.stringify(data))));
+  frag = 'import=' + encodeURIComponent(packed) + (frag ? '&go=' + frag : '');
+}
+const url = dest + (frag ? '#' + frag : '');
+document.getElementById('go').href = url;
+location.replace(url);
+</script></body></html>"""
+
+
+@web.middleware
+async def one_address(request, handler):
+    if (CANONICAL and request.method == "GET" and PAGE_PATH.match(request.path)
+            and request.host and request.host.lower() != CANON_HOST.lower()):
+        page = MOVE_PAGE.replace("__DEST__", json.dumps(CANONICAL + request.path_qs)) \
+                        .replace("__CARRY__", "true" if request.path == "/" else "false")
+        return web.Response(text=page, content_type="text/html", headers={"Cache-Control": "no-store"})
+    return await handler(request)
+
+
 async def healthz(_):
     return web.Response(text="ok")
 
@@ -1718,7 +1760,7 @@ async def stop_bg(app):
         analyzer.save()
 
 
-app = web.Application()
+app = web.Application(middlewares=[one_address])
 app.router.add_get("/", index)
 app.router.add_get("/healthz", healthz)
 app.router.add_get("/api/status", api_status)

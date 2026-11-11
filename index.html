@@ -614,6 +614,31 @@
 </details>
 
 <script>
+// Arrived from coffee.lan (or another name for this page)? Bring that browser's saved
+// preferences across, once: the preset and phone from there win (they're the ones people
+// have been using); recent orders from both are kept. Then tidy the address bar.
+(() => {
+  const m = location.hash.match(/^#import=([^&]+)(?:&go=(.*))?$/);
+  if (!m) return;
+  try {
+    if (localStorage.getItem('coffee-imported') !== '1') {
+      const data = JSON.parse(decodeURIComponent(escape(atob(decodeURIComponent(m[1])))));
+      for (const [k, v] of Object.entries(data)) {
+        if (!k.startsWith('coffee-') || typeof v !== 'string') continue;
+        if (k === 'coffee-history' || k === 'coffee-mine') {
+          const here = JSON.parse(localStorage.getItem(k) || '[]'), there = JSON.parse(v || '[]');
+          const seen = new Set(here.map(x => JSON.stringify(x)));
+          const merged = [...here, ...there.filter(x => !seen.has(JSON.stringify(x)))];
+          localStorage.setItem(k, JSON.stringify(k === 'coffee-history' ? merged.slice(0, 6) : merged));
+        } else {
+          localStorage.setItem(k, v);
+        }
+      }
+      localStorage.setItem('coffee-imported', '1');
+    }
+  } catch {}
+  history.replaceState(null, '', location.pathname + location.search + (m[2] ? '#' + m[2] : ''));
+})();
 const FIELDS = ['drink', 'size', 'milk', 'beans', 'shots', 'sugar', 'cup'];
 const DEFAULTS = { drink: 'Flat white', size: 'Regular', milk: 'Full cream', beans: 'Regular', shots: 'Single', sugar: 'No sugar', cup: "Dan's choice" };
 const LABELS = { 'Half & half': 'Half & half (½ decaf) · Hayley’s' };
