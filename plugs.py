@@ -315,14 +315,22 @@ class TuyaPlug(Plug):
                     break  # nothing listening: trying other versions won't help
             raise RuntimeError(f"Tuya plug at {self.host}: {last}")
         dp = self.dps_map
-        # ask for fresh power readings first (most plugs only refresh them now and then)
+        # Ask for fresh power readings first (most plugs only refresh them now and then).
+        # The plug answers that on the same socket, possibly after we've asked for status,
+        # so a reply can hold only some data points: merge what comes back and keep
+        # reading until one includes the switch, or the on/off state would be stale.
         await asyncio.to_thread(self.dev.updatedps, [dp["current_ma"], dp["power_dw"], dp["voltage_dv"]], True)
-        reply = await asyncio.to_thread(self.dev.status)
-        err = None if isinstance(reply, dict) and "dps" in reply else (self._err(reply) or "no answer")
-        if err:
-            await self.close()
-            raise RuntimeError(f"Tuya plug at {self.host}: {err}")
-        return reply
+        merged = {}
+        for _ in range(3):
+            reply = await asyncio.to_thread(self.dev.status)
+            err = None if isinstance(reply, dict) and "dps" in reply else (self._err(reply) or "no answer")
+            if err:
+                await self.close()
+                raise RuntimeError(f"Tuya plug at {self.host}: {err}")
+            merged.update({str(k): v for k, v in reply["dps"].items()})
+            if str(dp["switch"]) in merged:
+                break
+        return {"dps": merged}
 
     async def _update(self):
         reply = await self._status()
@@ -346,6 +354,11 @@ class TuyaPlug(Plug):
         if err:
             await self.close()
             raise RuntimeError(f"Tuya plug at {self.host}: {err}")
+        # the plug's answer carries the new state; don't wait for the next status to know it
+        got = reply.get("dps") if isinstance(reply, dict) and isinstance(reply.get("dps"), dict) else {}
+        self.dps.update({str(k): v for k, v in got.items()})
+        if str(dp["switch"]) not in {str(k) for k in got}:
+            self.dps[str(dp["switch"])] = bool(on)
         if on and self.countdown_s and str(dp["countdown"]) in self.dps:
             # the plug's own countdown: switches itself off if coffee.lan doesn't
             await asyncio.to_thread(self.dev.set_value, dp["countdown"], int(self.countdown_s))
