@@ -51,8 +51,10 @@ only active orders (up to 24 h) and anonymous totals.
 - **Order ↔ dose matching.** A new order is checked against the loaded dose.
   A match flags the Signal message "🚨 READY TO GO", and can grind straight away
   and have Spruik phone at once (both optional); a mismatch is warned about.
-- **Any common smart plug.** Tapo/Kasa (python-kasa), Shelly (Gen1 and Gen2+)
-  and Tasmota, each with Test and a network scan on the settings page.
+- **Any common smart plug.** Tapo/Kasa (python-kasa), Shelly (Gen1 and Gen2+),
+  Tasmota, and Tuya-based plugs on stock firmware such as the Arlec Grid Connect
+  PC191HA (tinytuya, local network), each with Test and a network scan on the
+  settings page.
 - **Power and maintenance.** With a plug that measures power on the machine
   (Tapo P110, Shelly PM, Tasmota energy), watts are read every couple of
   seconds while it's on. The heater (big step) and pump (smaller step on top)
@@ -111,6 +113,25 @@ kubectl -n home-automation create secret generic coffee-giphy \
 The Tapo login is the TP-Link account the plug is paired to. Turn on
 **Third-Party Compatibility** in the Tapo app so local control works.
 Disable any schedules in the Tapo app, because this app is the only scheduler.
+
+### Tuya plugs (Arlec Grid Connect, Smart Life …)
+
+coffee.lan talks to these directly on the local network, but every plug encrypts
+that traffic with its own *local key*, which only Tuya's cloud hands out. Fetch
+it once:
+
+1. Pair the plug in the **Smart Life** app (not Grid Connect: Smart Life accounts
+   can be linked to a developer project).
+2. At <https://platform.tuya.com>, create a Cloud project (data centre: the one
+   your Smart Life account uses), then under *Devices → Link App Account* scan
+   the QR code with Smart Life.
+3. Run `python -m tinytuya wizard` with the project's Access ID and Secret. It
+   lists each device's ID and local key.
+4. In Settings, pick *Tuya / Arlec Grid Connect / Smart Life*, enter the plug's
+   IP, device ID and local key, and press Test.
+
+After that no cloud is involved. Re-pairing the plug changes its key. The key is
+kept in `/data/settings.json` and never sent back to the page or logged.
 
 ## Configuration
 

@@ -509,12 +509,7 @@ def merge_settings(body, base):
     for role, p in (body.get("plugs") or {}).items():
         if role not in out["plugs"] or not isinstance(p, dict):
             raise ValueError("plugs are 'machine' and 'grinder'")
-        driver, host = p.get("driver", out["plugs"][role]["driver"]), str(p.get("host", out["plugs"][role]["host"])).strip()
-        if driver not in plugs.DRIVERS:
-            raise ValueError(f"unknown plug type {driver!r}")
-        if host and not re.fullmatch(r"[A-Za-z0-9.\-]{1,253}", host):
-            raise ValueError("the plug address should be an IP address or host name")
-        out["plugs"][role] = {"driver": driver, "host": host}
+        out["plugs"][role] = clean_plug(p, out["plugs"][role])
     m = body.get("machine") or {}
     if "warmup_min" in m:
         out["machine"]["warmup_min"] = int(num(m["warmup_min"], 1, 90, "warm-up minutes", 0))
@@ -542,6 +537,41 @@ def merge_settings(body, base):
     for flag in ("call_on_match", "backstop"):
         if flag in g:
             out["grinder"][flag] = bool(g[flag])
+    return out
+
+
+def clean_plug(p, old):
+    """One plug's settings, validated. A blank local key keeps the saved one (the page never sees it)."""
+    driver, host = p.get("driver", old.get("driver")), str(p.get("host", old.get("host", ""))).strip()
+    if driver not in plugs.DRIVERS:
+        raise ValueError(f"unknown plug type {driver!r}")
+    if host and not re.fullmatch(r"[A-Za-z0-9.\-]{1,253}", host):
+        raise ValueError("the plug address should be an IP address or host name")
+    out = {"driver": driver, "host": host}
+    if driver == "tuya":
+        dev_id = str(p.get("device_id", old.get("device_id", "")) or "").strip()
+        if dev_id and not re.fullmatch(r"[A-Za-z0-9]{10,32}", dev_id):
+            raise ValueError("the Tuya device ID is 10-32 letters and digits")
+        key = str(p.get("local_key") or "")
+        if not key and old.get("driver") == "tuya" and old.get("device_id") == dev_id:
+            key = old.get("local_key", "")
+        if key and not re.fullmatch(r"[\x21-\x7e]{8,64}", key):
+            raise ValueError("the Tuya local key looks wrong (it's usually 16 characters)")
+        version = str(p.get("version", old.get("version", "auto")) or "auto")
+        if version not in ("auto", "3.1", "3.3", "3.4", "3.5"):
+            raise ValueError("Tuya protocol version is auto, 3.1, 3.3, 3.4 or 3.5")
+        dps = p.get("dps", old.get("dps")) or {}
+        if not isinstance(dps, dict) or any(k not in plugs.TUYA_DPS or not str(v).isdigit() for k, v in dps.items()):
+            raise ValueError("Tuya data points: " + ", ".join(plugs.TUYA_DPS) + " (numbers)")
+        out.update(device_id=dev_id, local_key=key, version=version, dps={k: int(v) for k, v in dps.items()})
+    return out
+
+
+def public_plug(cfg):
+    """A plug's settings for the page: the local key is never sent back."""
+    out = {k: v for k, v in cfg.items() if k != "local_key"}
+    if cfg.get("driver") == "tuya":
+        out["local_key_set"] = bool(cfg.get("local_key"))
     return out
 
 
@@ -573,10 +603,10 @@ live_plugs: dict[str, plugs.Plug | None] = {"machine": None, "grinder": None}
 def plug(role) -> plugs.Plug | None:
     want = settings["plugs"][role]
     p = live_plugs[role]
-    if p is None or p.driver != want["driver"] or p.host != want["host"]:
+    if p is None or p.key != plugs.config_key(want):
         if p is not None:
             asyncio.create_task(p.close())
-        p = live_plugs[role] = plugs.make(want["driver"], want["host"])
+        p = live_plugs[role] = plugs.make(want)
     return p
 
 
@@ -853,9 +883,10 @@ async def grinder_watch():
             continue
         p = plug("grinder")
         try:
-            if backstop_for != (p.driver, p.host, settings["grinder"]["backstop"], settings["grinder"]["max_run_s"]):
+            want = (p.key, settings["grinder"]["backstop"], settings["grinder"]["max_run_s"])
+            if backstop_for != want:
                 await set_backstop()
-                backstop_for = (p.driver, p.host, settings["grinder"]["backstop"], settings["grinder"]["max_run_s"])
+                backstop_for = want
             if grinder["run"]:
                 continue  # the run's own timer handles it
             await p.update(max_age=1)
@@ -981,7 +1012,7 @@ def status():
             "default_minutes": DEFAULT_MIN, "max_minutes": MAX_MIN,
             "scheduled_until": datetime.fromtimestamp(win[1], TZ).strftime("%H:%M") if win else None,
             "next_scheduled": when(nxt[0]) if nxt else None,
-            "mode": settings["mode"], "plug": settings["plugs"]["machine"],
+            "mode": settings["mode"], "plug": public_plug(settings["plugs"]["machine"]),
             "plug_model": p.model if p is not None else "", "grinder": grinder_view()}
 
 
@@ -1429,7 +1460,7 @@ async def settings_page(_):
 
 # --- Settings, plugs and grinder API -------------------------------------------------
 def settings_view():
-    return {**settings, "modes": MODES, "drivers": plugs.DRIVERS, "beans": MENU["beans"],
+    return {**settings, "plugs": {r: public_plug(c) for r, c in settings["plugs"].items()}, "modes": MODES, "drivers": plugs.DRIVERS, "beans": MENU["beans"],
             "plate_s": GRINDER_PLATE_S, "scan_subnet": scan_subnet(),
             "live": {r: (p.info() if (p := live_plugs[r]) is not None and p.updated else None) for r in live_plugs}}
 
@@ -1466,7 +1497,7 @@ async def api_settings_set(req):
         record(None, "machine plug changed")
         state.update(is_on=None, off_at=None, on_since=None)
         await refresh()
-    log.info("settings saved: mode=%s plugs=%s", settings["mode"], settings["plugs"])
+    log.info("settings saved: mode=%s plugs=%s", settings["mode"], {r: public_plug(c) for r, c in settings["plugs"].items()})
     return web.json_response(settings_view())
 
 
@@ -1474,13 +1505,14 @@ async def api_plug_test(req):
     """Try a plug without saving it: model, on/off, watts."""
     try:
         body = await req.json()
-        p = plugs.make(body.get("driver"), str(body.get("host") or ""))
+        role = body.get("role") if body.get("role") in settings["plugs"] else "machine"
+        cfg = clean_plug(body, settings["plugs"][role])  # a blank Tuya key means the saved one
+        p = plugs.make(cfg)
         if p is None:
             raise ValueError("pick a plug type and address")
     except (ValueError, json.JSONDecodeError, AttributeError) as e:
         return web.json_response({"error": str(e) or "bad request"}, status=400)
-    current = [r for r in live_plugs if live_plugs[r] is not None
-               and (live_plugs[r].driver, live_plugs[r].host) == (p.driver, p.host)]
+    current = [r for r in live_plugs if live_plugs[r] is not None and live_plugs[r].key == p.key]
     if current:
         p = live_plugs[current[0]]  # same plug already connected: reuse its session
     try:

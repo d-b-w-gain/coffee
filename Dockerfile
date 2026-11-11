@@ -1,5 +1,5 @@
 FROM python:3.12-slim
-RUN pip install --no-cache-dir --root-user-action=ignore python-kasa==0.10.2
+RUN pip install --no-cache-dir --root-user-action=ignore python-kasa==0.10.2 tinytuya==1.20.0
 WORKDIR /app
 COPY app.py plugs.py power.py index.html order.html rate.html settings.html ./
 USER 65534
