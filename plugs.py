@@ -342,6 +342,8 @@ class TuyaPlug(Plug):
         power = self.dps.get(dp["power_dw"])
         self.metered = power is not None
         self.watts = power / 10 if isinstance(power, (int, float)) else None
+        if self.is_on is False and self.metered:
+            self.watts = 0.0  # relay open: the plug's power reading lags a few seconds behind
         volts = self.dps.get(dp["voltage_dv"])
         self.volts = volts / 10 if isinstance(volts, (int, float)) and volts else None
 
