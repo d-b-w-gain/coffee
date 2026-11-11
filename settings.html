@@ -131,6 +131,11 @@
   <h2>Maintenance</h2>
   <div class="muted">Daily numbers from the plugs. After a few weeks, slow drifts get flagged: heater drawing less (ageing element), longer warm-ups (scale), pump working harder or longer (scale, choked jet, vane wear), grinder working harder (dull burrs, needs a power-measuring plug on the grinder).</div>
   <div id="trends"></div>
+  <h3>Shots</h3>
+  <div class="muted">A pump run of 15 s or more is a shot; a short run in the 3 minutes before it is its purge (a short run after is the boiler refilling). Rate the taste on the main page.</div>
+  <div id="shot-sum" class="muted" style="margin-top:6px"></div>
+  <div class="tablewrap"><table id="shots"></table></div>
+  <h3>Daily numbers</h3>
   <div class="tablewrap"><table id="days"></table></div>
 </section>
 
@@ -315,6 +320,19 @@ async function loadMaint() {
     days.map(d => `<tr>${cols.map(([k]) => `<td>${d[k] ?? '–'}</td>`).join('')}</tr>`).join('') : '<tr><td class="muted">No days recorded yet.</td></tr>';
 }
 
+async function loadShots() {
+  let v; try { v = await (await fetch('api/shots')).json(); } catch { return; }
+  const sum = v.summary, part = (name, g) => `${name}: ${g.shots} shot${g.shots === 1 ? '' : 's'}` +
+    (g.good_pct != null ? `, ${g.good_pct}% tasted good` : '') + (g.avg_rating != null ? `, rated ${g.avg_rating}/5` : '');
+  $('shot-sum').textContent = part('Purged', sum['purged']) + ' · ' + part('Not purged', sum['not purged']);
+  const fmt = sec => sec < 90 ? `${sec} s` : `${Math.round(sec / 60)} min`;
+  $('shots').innerHTML = v.shots.length ? '<tr><th>When</th><th>Pump</th><th>Purge</th><th>Idle before</th><th>Taste</th><th>Rated</th></tr>' +
+    v.shots.map(x => `<tr><td>${new Date(x.t * 1000).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}</td>` +
+      `<td>${x.dur} s</td><td>${x.purged ? x.purge_s + ' s' : '⚠️ none'}</td><td>${fmt(x.idle_s)}</td>` +
+      `<td>${x.taste || '–'}</td><td>${x.rating ? x.rating + '/5' : '–'}</td></tr>`).join('')
+    : '<tr><td class="muted">No shots recorded yet.</td></tr>';
+}
+
 async function load() {
   S = await (await fetch('api/settings')).json();
   renderModes(); renderPlugs(); renderGrinder(); renderMachine();
@@ -333,9 +351,10 @@ async function save() {
 }
 window.addEventListener('beforeunload', e => { if (dirty) { e.preventDefault(); e.returnValue = ''; } });
 
-load().then(() => { loadGrinder(); loadPower(); loadMaint(); if (location.hash) document.querySelector(location.hash)?.scrollIntoView(); });
+load().then(() => { loadGrinder(); loadPower(); loadMaint(); loadShots(); if (location.hash) document.querySelector(location.hash)?.scrollIntoView(); });
 setInterval(loadPower, 3000);
 setInterval(loadMaint, 60000);
+setInterval(loadShots, 30000);
 setInterval(loadGrinder, 5000);
 </script>
 </body>

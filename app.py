@@ -1013,7 +1013,16 @@ def status():
             "scheduled_until": datetime.fromtimestamp(win[1], TZ).strftime("%H:%M") if win else None,
             "next_scheduled": when(nxt[0]) if nxt else None,
             "mode": settings["mode"], "plug": public_plug(settings["plugs"]["machine"]),
-            "plug_model": p.model if p is not None else "", "grinder": grinder_view()}
+            "plug_model": p.model if p is not None else "", "grinder": grinder_view(),
+            "last_shot": last_shot()}
+
+
+def last_shot():
+    """The latest shot from the last 3 hours, for the 'how was it?' card."""
+    if not analyzer or not analyzer.shots:
+        return None
+    x = analyzer.shots[-1]
+    return analyzer.public_shot(x) if time.time() - x["t"] < 3 * 3600 else None
 
 
 def schedule_view():
@@ -1268,6 +1277,8 @@ async def api_order_set(req):
     was = o["status"]
     o["status"], o["updated"] = new, time.time()
     result = public(o)
+    if new == "made" and was == "waiting" and analyzer:
+        analyzer.link_order(req.match_info["oid"], time.time())  # that shot was this coffee
     if new in ("made", "delivered") and not o.get("stock_used"):
         o["stock_used"] = True
         await warn_low(use_stock(o))
@@ -1308,6 +1319,8 @@ async def api_order_rate(req):
     tags = [t for t in RATE_TAGS if t in (body.get("tags") or [])][:4]
     comment = clean(body.get("comment"), 120)
     o["rating"] = {"beans": beans, "tags": tags, "comment": comment, "at": int(time.time())}
+    if analyzer:
+        analyzer.order_rated(req.match_info["oid"], beans, tags)
     result = public(o)
     oid = req.match_info["oid"]
     reviewed = bool(o.get("review"))
@@ -1653,6 +1666,22 @@ async def api_maintenance(_):
                               "typical_warmup_min": warmup_minutes(), "grinder_totals": grinder["totals"]})
 
 
+async def api_shots(_):
+    return web.json_response(analyzer.shots_view())
+
+
+async def api_shot_taste(req):
+    try:
+        body = await req.json()
+        x = analyzer.set_taste(req.match_info["sid"], body.get("taste"))
+    except KeyError:
+        return web.json_response({"error": "no such shot"}, status=404)
+    except (ValueError, json.JSONDecodeError, AttributeError) as e:
+        return web.json_response({"error": str(e) or "bad request"}, status=400)
+    log.info("shot tasted: %s (purged=%s, idle %d s)", x["taste"], x["purged"], x["idle_s"])
+    return web.json_response(analyzer.public_shot(x))
+
+
 async def api_sim_pump(req):
     """Testing only (COFFEE_SIM=1): pretend the pump runs for a few seconds."""
     plugs.SimPlug.pump_until = time.time() + float(req.query.get("s", 25))
@@ -1723,6 +1752,8 @@ app.router.add_post("/api/grinder/stop", api_grinder_stop)
 app.router.add_post("/api/grinder/clear", api_grinder_clear)
 app.router.add_get("/api/power", api_power)
 app.router.add_get("/api/maintenance", api_maintenance)
+app.router.add_get("/api/shots", api_shots)
+app.router.add_post("/api/shots/{sid}/taste", api_shot_taste)
 if plugs.SIM:
     app.router.add_post("/api/sim/pump", api_sim_pump)
 app.on_startup.append(start_bg)

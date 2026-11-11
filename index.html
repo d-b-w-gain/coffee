@@ -183,6 +183,15 @@
   .hint[hidden] { display:none; }
   .stop { background:var(--off); }
   .footer { font-size:14px; }
+  .shot { margin:0 20px 14px; border:1px solid var(--line); border-radius:12px; padding:10px 12px; font-size:14px; }
+  .shot[hidden] { display:none; }
+  .shot .what { margin-bottom:4px; }
+  .shot .why { color:var(--muted); font-size:13px; }
+  .shot .why.warn { color:var(--off); }
+  .shot .tastes { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+  .shot .tastes button { flex:1 1 45%; padding:7px 4px; font-size:13px; border-radius:8px; border:1px solid var(--line);
+                         background:transparent; color:var(--fg); }
+  .shot .tastes button[aria-pressed=true] { background:var(--brew); border-color:var(--brew); color:#fff; }
   .footer a { color:var(--muted); }
 </style>
 </head>
@@ -376,6 +385,11 @@
     </button>
   </div>
   <div class="err machine-err" id="err"></div>
+  <div class="shot" id="shot" hidden>
+    <div class="what" id="shot-what"></div>
+    <div class="why" id="shot-why"></div>
+    <div class="tastes" id="shot-tastes" role="group" aria-label="How did that shot taste?"></div>
+  </div>
   <details class="sched" id="sched">
     <summary>Machine schedule · <span id="sched-sum">…</span></summary>
     <div class="tl-head"><b>Last 24 hours</b><span class="muted" id="tl-total"></span></div>
@@ -725,6 +739,39 @@ function show(s) {
   if (s.plug) $('plug-line').textContent = `${s.plug_model || s.plug.driver} · ${s.plug.host || 'not set'}`;
   $('err').textContent = s.error || '';
   showGrinder(s.grinder);
+  showShot(s.last_shot);
+}
+
+// ---- last shot: what happened before it, and how it tasted -------------------
+const TASTES = ['Good 👍', 'Too hot / bitter 🔥', 'Sour / weak 😬', 'Not sure 🤷'];
+let shotShown = null;
+function mins(sec) { return sec < 90 ? `${sec} s` : `${Math.round(sec / 60)} min`; }
+function showShot(x) {
+  const box = $('shot');
+  box.hidden = !x;
+  if (!x) return;
+  const at = new Date(x.t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  $('shot-what').innerHTML = `<b>Last shot</b> · ${at} · pump ${x.dur} s`;
+  const why = $('shot-why');
+  why.className = 'why' + (x.purged ? '' : ' warn');
+  why.textContent = x.purged
+    ? `✓ Purged ${x.purge_s} s first, ${x.purge_gap_s} s before (group sat ${mins(x.idle_s)} before that)`
+    : `⚠️ Not purged: no water through the group for ${mins(x.idle_s)} before it${x.idle_from === 'switch-on' ? ' (since switch-on)' : ''}`;
+  if (shotShown === x.id + (x.taste || '')) return;  // don't rebuild the buttons every poll
+  shotShown = x.id + (x.taste || '');
+  const row = $('shot-tastes'); row.innerHTML = '';
+  if (!x.taste) row.append(Object.assign(document.createElement('span'), { className: 'muted', textContent: 'How did it taste?', style: 'flex-basis:100%' }));
+  for (const t of TASTES) {
+    const b = document.createElement('button'); b.type = 'button'; b.textContent = t;
+    b.setAttribute('aria-pressed', String(x.taste === t));
+    b.onclick = async () => {
+      try {
+        const r = await fetch(`api/shots/${x.id}/taste`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ taste: t }) });
+        if (r.ok) showShot(await r.json());
+      } catch {}
+    };
+    row.append(b);
+  }
 }
 async function poll() { try { show(await (await fetch('api/status')).json()); } catch {} }
 async function toggle() {
