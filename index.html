@@ -1019,7 +1019,7 @@ function renderCase(c) {
 async function loadCase() { try { renderCase(await (await fetch('api/casefile')).json()); } catch {} }
 
 // ---- grinder (single dosing) --------------------------------------------
-let G = null, gBeans = 'Regular', gFast = null;
+let G = null, gBeans = 'Regular', gFast = null, gNote = null;
 function buildBeanPick() {
   const box = $('g-beans'); box.innerHTML = '';
   for (const b of ['Regular', 'Decaf', 'Half & half']) {
@@ -1051,13 +1051,17 @@ function showGrinder(g) {
     : 'Empty · load a dose';
   $('g-sub').textContent = grinding ? `${Math.floor(run.seconds)} of ${Math.round(run.of)} s`
     : g.rest_s > 0 ? `Resting ${g.rest_s} s (motor: 50 s on / 50 s off)`
-    : loaded && g.grind_s ? `Grinds for ${g.grind_s} s` : loaded ? 'Time a grind in Tuning first' : '';
+    : loaded && g.grind_s ? `Grinds for ${g.grind_s} s`
+    : loaded ? 'First grind: press Stop the moment it runs empty, and that time is saved' : '';
   $('g-load').hidden = grinding;
-  $('g-grind').textContent = grinding ? 'Stop' : 'Grind';
+  // No grind time yet: the first grind times itself (runs until Stop, never past the 50 s limit).
+  $('g-grind').textContent = grinding ? 'Stop' : loaded && !g.grind_s ? 'Grind & time it' : 'Grind';
   $('g-grind').classList.toggle('stop', grinding);
-  $('g-grind').disabled = !grinding && (!loaded || !g.grind_s || g.rest_s > 0 || g.on === null);
+  $('g-grind').disabled = !grinding && (!loaded || g.rest_s > 0 || g.on === null);
   $('g-clear').disabled = grinding || !d;
-  $('g-err').textContent = g.error || '';
+  const note = gNote && Date.now() < gNote.until ? gNote.text : '';
+  $('g-err').textContent = g.error || note;
+  $('g-err').classList.toggle('ok', !g.error && !!note && gNote.ok);
   // poll quickly while something is happening
   const busy = grinding || g.rest_s > 0;
   if (busy && !gFast) gFast = setInterval(loadGrinder, 1000);
@@ -1078,7 +1082,21 @@ async function loadDose() {
   $('g-hint').hidden = !g;
   if (g) setTimeout(() => { $('g-hint').hidden = true; }, 60000);
 }
-async function grindNow() { $('g-hint').hidden = true; await gPost(G && G.run ? 'stop' : 'grind'); }
+async function grindNow() {
+  $('g-hint').hidden = true;
+  if (G && G.run) {
+    const g = await gPost('stop');
+    const res = g && g.result;
+    if (res && (res.timed || res.error)) {
+      gNote = { text: res.timed ? `✓ Saved ${res.timed} s as the ${(G.dose || {}).beans || 'grind'} time` : res.error, until: Date.now() + 20000, ok: !!res.timed };
+      showGrinder(G);
+    }
+    return;
+  }
+  gNote = null;
+  const timed = G && G.grind_s;
+  await gPost(timed ? 'grind' : 'teach', timed ? {} : { beans: (G && G.dose || {}).beans || 'Regular' });
+}
 async function clearDose() { await gPost('clear'); }
 buildBeanPick();
 
