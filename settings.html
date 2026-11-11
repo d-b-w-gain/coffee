@@ -22,7 +22,7 @@
   .err { color:var(--off); font-size:14px; min-height:1.3em; margin-top:6px; }
   .ok { color:var(--on); }
   label { display:block; font-size:13px; color:var(--muted); margin:10px 0 4px; }
-  select, input[type=text], input[type=number] { font:inherit; padding:9px 10px; border-radius:10px; border:1px solid var(--line);
+  select, input[type=text], input[type=number], input[type=password] { font:inherit; padding:9px 10px; border-radius:10px; border:1px solid var(--line);
          background:transparent; color:inherit; width:100%; min-width:0; }
   select option { color:#000; }
   button { font:inherit; cursor:pointer; }
@@ -80,7 +80,7 @@
 
 <section>
   <h2>Smart plugs</h2>
-  <div class="muted">Tapo and Kasa (TP-Link), Shelly and Tasmota plugs work directly. Tapo plugs need “Third-Party Compatibility” turned on in the Tapo app.
+  <div class="muted">Tapo and Kasa (TP-Link), Shelly, Tasmota and Tuya-based plugs (Arlec Grid Connect, Smart Life) work directly. Tapo plugs need “Third-Party Compatibility” turned on in the Tapo app.
     A plug that measures power (like the Tapo P110) on the machine adds the power trace, measured warm-ups and maintenance numbers below.</div>
   <div class="plug" id="plug-machine"></div>
   <div class="plug" id="plug-grinder"></div>
@@ -166,7 +166,7 @@ function renderPlugs() {
     const p = S.plugs[role];
     const sel = el('select', { id: role + '-driver' });
     for (const [k, name] of Object.entries(S.drivers)) sel.add(new Option(name, k, false, p.driver === k));
-    sel.onchange = () => { p.driver = sel.value; markDirty(); };
+    sel.onchange = () => { p.driver = sel.value; markDirty(); renderPlugs(); };
     const host = el('input', { type: 'text', id: role + '-host', placeholder: '192.168.88.x', value: p.host || '' });
     host.oninput = () => { p.host = host.value.trim(); markDirty(); };
     const res = el('div', { class: 'res', id: role + '-res' });
@@ -177,8 +177,25 @@ function renderPlugs() {
       role === 'grinder' && S.mode !== 'machine+grinder' ? el('span', { class: 'muted' }, ' · not used in “machine only” mode') : '',
       el('div', { class: 'grid' },
         el('div', {}, el('label', { for: role + '-driver' }, 'Type'), sel),
-        el('div', {}, el('label', { for: role + '-host' }, 'Address'), host), test), res);
+        el('div', {}, el('label', { for: role + '-host' }, 'Address'), host), test),
+      p.driver === 'tuya' ? tuyaFields(role, p) : '', res);
   }
+}
+function tuyaFields(role, p) {
+  const id = el('input', { type: 'text', id: role + '-devid', value: p.device_id || '', placeholder: 'e.g. bf1234abcd5678efgh90', autocomplete: 'off' });
+  id.oninput = () => { p.device_id = id.value.trim(); markDirty(); };
+  const key = el('input', { type: 'password', id: role + '-key', value: '', autocomplete: 'off',
+                            placeholder: p.local_key_set ? 'saved (leave blank to keep)' : '16 characters' });
+  key.oninput = () => { p.local_key = key.value; markDirty(); };
+  const ver = el('select', { id: role + '-ver' });
+  for (const v of ['auto', '3.3', '3.4', '3.5', '3.1']) ver.add(new Option(v === 'auto' ? 'Auto-detect' : v, v, false, (p.version || 'auto') === v));
+  ver.onchange = () => { p.version = ver.value; markDirty(); };
+  return el('div', {},
+    el('div', { class: 'grid2' },
+      el('div', {}, el('label', { for: role + '-devid' }, 'Device ID'), id),
+      el('div', {}, el('label', { for: role + '-key' }, 'Local key'), key),
+      el('div', {}, el('label', { for: role + '-ver' }, 'Protocol'), ver)),
+    el('div', { class: 'muted', style: 'margin-top:6px' }, 'From Tuya’s cloud, once (tinytuya wizard). Re-pairing the plug changes the key. Day to day, coffee.lan talks to the plug directly.'));
 }
 function describePlug(i) {
   return `✅ ${i.model || i.driver} · ${i.on === null ? '?' : i.on ? 'on' : 'off'}` +
@@ -187,7 +204,7 @@ function describePlug(i) {
 async function testPlug(role) {
   const res = $(role + '-res'); res.textContent = 'Testing…'; res.className = 'res';
   try {
-    const r = await fetch('api/plugs/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(S.plugs[role]) });
+    const r = await fetch('api/plugs/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...S.plugs[role], role }) });
     const j = await r.json();
     if (j.ok) { res.textContent = describePlug(j); res.className = 'res ok'; }
     else { res.textContent = '❌ ' + (j.error || 'no answer'); res.className = 'res err'; }
@@ -204,7 +221,8 @@ async function scan() {
         f.role ? el('span', { class: 'muted' }, ` (the ${f.role} now)`) : ''));
       const acts = el('span', { class: 'row', style: 'margin:0;flex-wrap:nowrap' });
       for (const role of ['machine', 'grinder']) acts.append(el('button', { class: 'btn', type: 'button', onclick: () => {
-        S.plugs[role] = { driver: f.driver, host: f.host }; markDirty(); renderPlugs(); testPlug(role); } }, 'Use for ' + role));
+        S.plugs[role] = { ...(S.plugs[role].driver === f.driver ? S.plugs[role] : {}), driver: f.driver, host: f.host };
+        markDirty(); renderPlugs(); if (f.driver !== 'tuya') testPlug(role); } }, 'Use for ' + role));
       li.append(acts); $('found').append(li);
     }
   } catch (e) { $('scan-msg').textContent = 'Scan failed: ' + (e.message || e); }

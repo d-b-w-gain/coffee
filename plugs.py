@@ -6,6 +6,10 @@
     shelly   Shelly plugs and relays, Gen1 (HTTP /relay, /status) and Gen2+
              (RPC: Plus Plug S, Plug S Gen3, 1PM ...). No login support yet.
     tasmota  Anything running Tasmota (Sonoff, Athom, Nous, Gosund ...), HTTP API.
+    tuya     Tuya-based plugs on their stock firmware (Arlec Grid Connect, Smart
+             Life, Brilliant, Deta ...) over the local network with tinytuya. Each
+             needs its device ID and local key, fetched once from Tuya's cloud
+             (python -m tinytuya wizard); after that no cloud is involved.
     sim      A pretend plug for testing (only offered when COFFEE_SIM=1).
 
 Every driver reports is_on, and watts when the plug measures power. Each can
@@ -20,6 +24,7 @@ import random
 import time
 
 import aiohttp
+import tinytuya
 from kasa import Credentials, Device, DeviceConfig, Discover, Module
 
 log = logging.getLogger("coffee.plugs")
@@ -32,7 +37,9 @@ DRIVERS = {
     "tapo": "TP-Link Tapo / Kasa",
     "shelly": "Shelly",
     "tasmota": "Tasmota",
+    "tuya": "Tuya / Arlec Grid Connect / Smart Life",
 }
+EXTRA_FIELDS = {"tuya": ("device_id", "local_key", "version", "dps")}  # beyond driver + host
 if SIM:
     DRIVERS["sim"] = "Simulated (testing)"
 
@@ -50,6 +57,7 @@ class Plug:
         self.metered: bool | None = None  # unknown until the first reading
         self.on_since: float | None = None  # when the plug says it was switched on, if it knows
         self.updated = 0.0
+        self.key = None  # set by make(): the settings this connection was made from
         self._lock = asyncio.Lock()
 
     async def update(self, max_age=0.0):
@@ -255,6 +263,110 @@ class TasmotaPlug(Plug):
         return f"plug auto-off after {s} s"
 
 
+# --- Tuya (stock firmware, local protocol) ------------------------------------------
+TUYA_DPS = {"switch": 1, "countdown": 9, "current_ma": 18, "power_dw": 19, "voltage_dv": 20}  # usual plug layout
+
+
+class TuyaPlug(Plug):
+    """Talks to the plug directly on port 6668, encrypted with its local key."""
+    driver = "tuya"
+    VERSIONS = (3.3, 3.4, 3.5, 3.1)
+
+    def __init__(self, host, device_id="", local_key="", version="auto", dps=None):
+        super().__init__(host)
+        self.device_id = str(device_id or "").strip()
+        self.local_key = str(local_key or "")
+        self.version = str(version or "auto")
+        self.dps_map = {**TUYA_DPS, **(dps or {})}
+        self.dev = None
+        self.proto = None
+        self.dps: dict = {}  # last value seen for each data point
+        self.countdown_s: int | None = None
+
+    def _make(self, v):
+        d = tinytuya.OutletDevice(self.device_id, self.host, self.local_key, version=v, connection_timeout=3,
+                                  connection_retry_limit=1, connection_retry_delay=1)
+        d.set_socketPersistent(True)
+        return d
+
+    @staticmethod
+    def _err(reply):
+        if not isinstance(reply, dict):
+            return None
+        if reply.get("Err") == "914" or "decrypt" in str(reply.get("Error", "")).lower():
+            return "the plug didn't accept that device ID / local key (re-paired? the key changes)"
+        return reply.get("Error")
+
+    async def _status(self):
+        if not (self.device_id and self.local_key):
+            raise RuntimeError("Tuya plugs need their device ID and local key (Settings)")
+        if self.dev is None:
+            versions = self.VERSIONS if self.version == "auto" else (float(self.version),)
+            last = "no answer"
+            for v in versions:
+                d = self._make(v)
+                reply = await asyncio.to_thread(d.status)
+                if isinstance(reply, dict) and "dps" in reply:
+                    self.dev, self.proto = d, v
+                    return reply
+                last = self._err(reply) or "no answer"
+                await asyncio.to_thread(d.close)
+                if reply and reply.get("Err") == "901":
+                    break  # nothing listening: trying other versions won't help
+            raise RuntimeError(f"Tuya plug at {self.host}: {last}")
+        dp = self.dps_map
+        # ask for fresh power readings first (most plugs only refresh them now and then)
+        await asyncio.to_thread(self.dev.updatedps, [dp["current_ma"], dp["power_dw"], dp["voltage_dv"]], True)
+        reply = await asyncio.to_thread(self.dev.status)
+        err = None if isinstance(reply, dict) and "dps" in reply else (self._err(reply) or "no answer")
+        if err:
+            await self.close()
+            raise RuntimeError(f"Tuya plug at {self.host}: {err}")
+        return reply
+
+    async def _update(self):
+        reply = await self._status()
+        self.dps.update({str(k): v for k, v in reply["dps"].items()})
+        dp = {k: str(v) for k, v in self.dps_map.items()}
+        self.model = f"Tuya plug (protocol {self.proto})"
+        sw = self.dps.get(dp["switch"])
+        self.is_on = bool(sw) if sw is not None else None
+        power = self.dps.get(dp["power_dw"])
+        self.metered = power is not None
+        self.watts = power / 10 if isinstance(power, (int, float)) else None
+        volts = self.dps.get(dp["voltage_dv"])
+        self.volts = volts / 10 if isinstance(volts, (int, float)) and volts else None
+
+    async def _turn(self, on):
+        if self.dev is None:
+            await self._update()
+        dp = self.dps_map
+        reply = await asyncio.to_thread(self.dev.set_value, dp["switch"], bool(on))
+        err = self._err(reply) if isinstance(reply, dict) and "dps" not in reply else None
+        if err:
+            await self.close()
+            raise RuntimeError(f"Tuya plug at {self.host}: {err}")
+        if on and self.countdown_s and str(dp["countdown"]) in self.dps:
+            # the plug's own countdown: switches itself off if coffee.lan doesn't
+            await asyncio.to_thread(self.dev.set_value, dp["countdown"], int(self.countdown_s))
+
+    async def _backstop(self, seconds):
+        if self.dev is None:
+            await self._update()
+        if str(self.dps_map["countdown"]) not in self.dps:
+            raise RuntimeError("this Tuya plug has no countdown timer")
+        self.countdown_s = int(seconds) if seconds else None
+        return "auto-off cleared" if seconds is None else f"plug countdown {int(seconds)} s on every grind"
+
+    async def close(self):
+        if self.dev is not None:
+            try:
+                await asyncio.to_thread(self.dev.close)
+            except Exception:
+                pass
+        self.dev = None
+
+
 # --- Simulated ------------------------------------------------------------------
 class SimPlug(Plug):
     """A pretend plug with a pretend load, for trying the app without hardware.
@@ -290,13 +402,22 @@ class SimPlug(Plug):
         return "simulated auto-off " + ("cleared" if seconds is None else f"after {seconds} s")
 
 
-CLASSES = {"tapo": KasaPlug, "shelly": ShellyPlug, "tasmota": TasmotaPlug, "sim": SimPlug}
+CLASSES = {"tapo": KasaPlug, "shelly": ShellyPlug, "tasmota": TasmotaPlug, "tuya": TuyaPlug, "sim": SimPlug}
 
 
-def make(driver, host) -> Plug | None:
+def config_key(cfg):
+    """What identifies a plug connection: a change in any of these means reconnect."""
+    return tuple([cfg.get("driver"), cfg.get("host")] + [str(cfg.get(f)) for f in EXTRA_FIELDS.get(cfg.get("driver"), ())])
+
+
+def make(cfg) -> Plug | None:
+    driver, host = cfg.get("driver"), str(cfg.get("host") or "")
     if not host or driver not in DRIVERS:
         return None
-    return CLASSES[driver](host)
+    extra = {f: cfg[f] for f in EXTRA_FIELDS.get(driver, ()) if cfg.get(f) not in (None, "")}
+    p = CLASSES[driver](host, **extra)
+    p.key = config_key(cfg)
+    return p
 
 
 # --- Finding plugs on the network -------------------------------------------------
@@ -322,6 +443,15 @@ async def _probe_http(session, ip):
     except Exception:
         pass
     return found
+
+
+async def _probe_tuya(ip):
+    try:
+        _, w = await asyncio.wait_for(asyncio.open_connection(ip, 6668), 0.8)
+        w.close()
+        return [{"driver": "tuya", "host": ip, "model": "Tuya / Grid Connect device", "name": "needs device ID + local key"}]
+    except Exception:
+        return []
 
 
 async def _probe_kasa(ip):
@@ -354,7 +484,7 @@ async def scan(subnet: str, skip=()):
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=1.5)) as s:
         async def one(ip):
             async with sem:
-                res = await asyncio.gather(_probe_kasa(ip), _probe_http(s, ip))
+                res = await asyncio.gather(_probe_kasa(ip), _probe_http(s, ip), _probe_tuya(ip))
                 for r in res:
                     out.extend(r)
         await asyncio.gather(*(one(ip) for ip in ips))
