@@ -183,7 +183,20 @@
   .hint[hidden] { display:none; }
   .stop { background:var(--off); }
   .footer { font-size:14px; }
-  .shot { margin:0 20px 14px; border:1px solid var(--line); border-radius:12px; padding:10px 12px; font-size:14px; }
+  .shot { margin-top:8px; border:1px solid var(--line); border-radius:12px; padding:10px 12px; font-size:14px; }
+  .shotsec[hidden] { display:none; }
+  /* Barista corner: the barista's tools, rolled up out of the customer's way. */
+  details.barista { width:min(420px, 100%); }
+  details.barista > summary { list-style:none; cursor:pointer; background:var(--card); border-radius:16px; padding:14px 20px;
+                              box-shadow:0 4px 20px #0002; display:flex; flex-direction:column; gap:2px; }
+  details.barista > summary::-webkit-details-marker { display:none; }
+  details.barista > summary .b-title { font-weight:700; font-size:17px; }
+  details.barista > summary .b-title::after { content:" ▾"; color:var(--muted); font-weight:400; }
+  details.barista[open] > summary .b-title::after { content:" ▴"; }
+  details.barista > summary .b-hint { color:var(--muted); font-size:13px; }
+  details.barista > summary .b-hint.alert { color:var(--brew); font-weight:600; }
+  .barista-body { display:flex; flex-direction:column; align-items:center; gap:16px; margin-top:16px; }
+  .barista-body > section { width:100%; }
   .shot[hidden] { display:none; }
   .shot .what { margin-bottom:4px; }
   .shot .why { color:var(--muted); font-size:13px; }
@@ -385,11 +398,6 @@
     </button>
   </div>
   <div class="err machine-err" id="err"></div>
-  <div class="shot" id="shot" hidden>
-    <div class="what" id="shot-what"></div>
-    <div class="why" id="shot-why"></div>
-    <div class="tastes" id="shot-tastes" role="group" aria-label="How did that shot taste?"></div>
-  </div>
   <details class="sched" id="sched">
     <summary>Machine schedule · <span id="sched-sum">…</span></summary>
     <div class="tl-head"><b>Last 24 hours</b><span class="muted" id="tl-total"></span></div>
@@ -419,6 +427,60 @@
   </details>
 </section>
 
+<section>
+  <h2>Request a coffee</h2>
+  <div class="muted center">Sends your order to Dan on Signal</div>
+  <div id="minewrap" hidden>
+    <label>Your orders</label>
+    <div id="mine"></div>
+  </div>
+  <div id="recentwrap" hidden>
+    <label>Your recent orders (saved on this device) · tap to fill in</label>
+    <div id="recent"></div>
+  </div>
+  <label for="name">Your name</label>
+  <input type="text" id="name" maxlength="40" placeholder="e.g. Hayley" autocomplete="given-name">
+  <label for="phone">Your Signal number (optional)</label>
+  <input type="tel" id="phone" maxlength="20" placeholder="0412 345 678" autocomplete="tel">
+  <div class="muted" style="margin-top:4px">Get a confirmation, a message when it’s ready, and a quick way to call Dan. Saved only on this device.</div>
+  <div class="grid">
+    <div><label for="drink">Drink</label><select id="drink"></select></div>
+    <div><label for="size">Size</label><select id="size"></select></div>
+    <div><label for="milk">Milk</label><select id="milk"></select></div>
+    <div><label for="beans">Beans</label><select id="beans"></select></div>
+    <div><label for="shots">Shots</label><select id="shots"></select></div>
+    <div><label for="sugar">Sugar</label><select id="sugar"></select></div>
+  </div>
+  <label id="cuplabel">Cup</label>
+  <div class="cups" id="cups" role="radiogroup" aria-labelledby="cuplabel"></div>
+  <select id="cup" hidden></select>
+  <label for="note">Anything else?</label>
+  <input type="text" id="note" maxlength="200" placeholder="extra hot, in the big mug…">
+  <label class="check"><input type="checkbox" id="warm" checked> Switch the machine on to warm up</label>
+  <div class="row"><button class="big brew" id="ask" onclick="ask()">Request coffee</button></div>
+  <div class="err" id="askmsg"></div>
+</section>
+
+<section>
+  <h2>🕵️ Case file</h2>
+  <div class="muted center">How Dan’s coffees rate. Totals only: no names are kept.</div>
+  <div class="case" id="case"><div class="wide"><span>No coffees rated yet. Rate yours from “Your orders” once it’s made.</span></div></div>
+</section>
+
+<details class="barista" id="barista">
+  <summary>
+    <span class="b-title">☕ Barista corner</span>
+    <span class="b-hint" id="barista-hint">grinder · last shot · stock · settings</span>
+  </summary>
+  <div class="barista-body">
+<section class="shotsec" id="shotsec" hidden>
+  <h2>Last shot</h2>
+  <div class="shot" id="shot" hidden>
+    <div class="what" id="shot-what"></div>
+    <div class="why" id="shot-why"></div>
+    <div class="tastes" id="shot-tastes" role="group" aria-label="How did that shot taste?"></div>
+  </div>
+</section>
 <section class="grinder unknown" id="grinder" hidden>
   <div class="stage">
     <svg class="grind-svg" viewBox="0 0 300 500" role="img" aria-label="Mazzer Mini grinder, single-dose modded">
@@ -540,47 +602,6 @@
     <div class="err" id="g-err"></div>
   </div>
 </section>
-
-<section>
-  <h2>Request a coffee</h2>
-  <div class="muted center">Sends your order to Dan on Signal</div>
-  <div id="minewrap" hidden>
-    <label>Your orders</label>
-    <div id="mine"></div>
-  </div>
-  <div id="recentwrap" hidden>
-    <label>Your recent orders (saved on this device) · tap to fill in</label>
-    <div id="recent"></div>
-  </div>
-  <label for="name">Your name</label>
-  <input type="text" id="name" maxlength="40" placeholder="e.g. Hayley" autocomplete="given-name">
-  <label for="phone">Your Signal number (optional)</label>
-  <input type="tel" id="phone" maxlength="20" placeholder="0412 345 678" autocomplete="tel">
-  <div class="muted" style="margin-top:4px">Get a confirmation, a message when it’s ready, and a quick way to call Dan. Saved only on this device.</div>
-  <div class="grid">
-    <div><label for="drink">Drink</label><select id="drink"></select></div>
-    <div><label for="size">Size</label><select id="size"></select></div>
-    <div><label for="milk">Milk</label><select id="milk"></select></div>
-    <div><label for="beans">Beans</label><select id="beans"></select></div>
-    <div><label for="shots">Shots</label><select id="shots"></select></div>
-    <div><label for="sugar">Sugar</label><select id="sugar"></select></div>
-  </div>
-  <label id="cuplabel">Cup</label>
-  <div class="cups" id="cups" role="radiogroup" aria-labelledby="cuplabel"></div>
-  <select id="cup" hidden></select>
-  <label for="note">Anything else?</label>
-  <input type="text" id="note" maxlength="200" placeholder="extra hot, in the big mug…">
-  <label class="check"><input type="checkbox" id="warm" checked> Switch the machine on to warm up</label>
-  <div class="row"><button class="big brew" id="ask" onclick="ask()">Request coffee</button></div>
-  <div class="err" id="askmsg"></div>
-</section>
-
-<section>
-  <h2>🕵️ Case file</h2>
-  <div class="muted center">How Dan’s coffees rate. Totals only: no names are kept.</div>
-  <div class="case" id="case"><div class="wide"><span>No coffees rated yet. Rate yours from “Your orders” once it’s made.</span></div></div>
-</section>
-
 <section>
   <h2>Stock</h2>
   <div class="muted center" id="stockhint">Goes down each time Dan marks a coffee made.</div>
@@ -588,8 +609,9 @@
   <div class="row"><button class="small" onclick="logCoffee()">Made one without an order? Log it</button></div>
   <div class="err" id="stockmsg"></div>
 </section>
-
 <div class="footer"><a href="settings">⚙️ Settings · plugs, grinder, power &amp; maintenance</a></div>
+  </div>
+</details>
 
 <script>
 const FIELDS = ['drink', 'size', 'milk', 'beans', 'shots', 'sugar', 'cup'];
@@ -744,11 +766,27 @@ function show(s) {
 
 // ---- last shot: what happened before it, and how it tasted -------------------
 const TASTES = ['Good 👍', 'Too hot / bitter 🔥', 'Sour / weak 😬', 'Not sure 🤷'];
+let lastShotNeedsTaste = false;
+function baristaHint() {
+  // One line on the closed Barista corner: is anything waiting for the barista?
+  const g = G, parts = [];
+  if (g && g.enabled) {
+    const d = g.dose;
+    parts.push(g.run ? 'grinding…' : d && d.status === 'ground' ? `${d.beans.toLowerCase()} ground, in the cup`
+      : d ? `${d.beans.toLowerCase()} dose loaded` : 'grinder empty');
+  }
+  if (lastShotNeedsTaste) parts.push('rate the last shot');
+  const h = $('barista-hint');
+  h.textContent = parts.length ? parts.join(' · ') : 'grinder · last shot · stock · settings';
+  h.classList.toggle('alert', !!(lastShotNeedsTaste || (g && g.run)));
+}
 let shotShown = null;
 function mins(sec) { return sec < 90 ? `${sec} s` : `${Math.round(sec / 60)} min`; }
 function showShot(x) {
   const box = $('shot');
-  box.hidden = !x;
+  box.hidden = $('shotsec').hidden = !x;
+  lastShotNeedsTaste = !!(x && !x.taste);
+  baristaHint();
   if (!x) return;
   const at = new Date(x.t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   $('shot-what').innerHTML = `<b>Last shot</b> · ${at} · pump ${x.dur} s`;
@@ -1079,6 +1117,7 @@ function buildBeanPick() {
 function showGrinder(g) {
   if (!g) return;
   G = g;
+  baristaHint();
   const sec = $('grinder');
   sec.hidden = !g.enabled;
   if (!g.enabled) return;
@@ -1146,6 +1185,17 @@ async function grindNow() {
 }
 async function clearDose() { await gPost('clear'); }
 buildBeanPick();
+
+// The Barista corner stays open on the barista's own devices, and links to #grinder open it.
+(() => {
+  const bc = $('barista');
+  let open = false;
+  try { open = localStorage.getItem('coffee-barista') === '1'; } catch {}
+  const target = location.hash && bc.querySelector(location.hash);
+  if (open || target) bc.open = true;
+  if (target) setTimeout(() => target.scrollIntoView({ behavior: 'smooth', block: 'start' }), 300);
+  bc.addEventListener('toggle', () => { try { localStorage.setItem('coffee-barista', bc.open ? '1' : '0'); } catch {} });
+})();
 
 trackMine(); poll(); loadStock(); loadSchedule(); loadHistory(); loadCase();
 setInterval(loadCase, 60000);
