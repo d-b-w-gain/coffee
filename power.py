@@ -22,6 +22,7 @@ live trace so they can be set from what the machine actually does.
 import json
 import logging
 import os
+import secrets
 import statistics
 import time
 from collections import deque
@@ -31,6 +32,13 @@ log = logging.getLogger("coffee.power")
 LIVE_KEEP_S = 30 * 60
 DAYS_KEEP = 400
 COLD_AFTER_S = 60 * 60  # off this long before switch-on counts as a cold start
+# Shots, read from pump runs. On a heat-exchanger machine like the Minibar the group's
+# water overheats while it sits, so a short purge through the group just before the shot
+# matters. A short run after a shot is the boiler refilling (hot water drawn), not a purge.
+SHOT_MIN_S = 15  # a pump run this long or longer is a shot
+PURGE_WINDOW_S = 180  # a short run ending this soon before a shot is its purge
+SHOTS_KEEP = 300
+TASTES = ["Good 👍", "Too hot / bitter 🔥", "Sour / weak 😬", "Not sure 🤷"]
 
 
 class Analyzer:
@@ -45,6 +53,8 @@ class Analyzer:
         self.heater_level = None  # recent watts with only the heater on
         self.base_level = None  # recent watts with nothing running
         self.pump = None  # current pump run
+        self.runs = deque(maxlen=20)  # recent pump runs: {"start", "end", "dur"}
+        self.shots: list[dict] = []
         self.heater_on = False
         self.last = None
         self.load()
@@ -56,6 +66,7 @@ class Analyzer:
                 data = json.load(f)
             self.days = data.get("days", {})
             self.last_off = data.get("last_off", 0.0)
+            self.shots = data.get("shots", [])
         except FileNotFoundError:
             pass
         except Exception as e:
@@ -68,7 +79,7 @@ class Analyzer:
             os.makedirs(os.path.dirname(self.path), exist_ok=True)
             tmp = self.path + ".tmp"
             with open(tmp, "w") as f:
-                json.dump({"days": self.days, "last_off": self.last_off}, f)
+                json.dump({"days": self.days, "last_off": self.last_off, "shots": self.shots[-SHOTS_KEEP:]}, f)
             os.replace(tmp, self.path)
         except OSError as e:
             log.warning("couldn't save maintenance log: %s", e)
@@ -139,17 +150,102 @@ class Analyzer:
             self.pump["wsum"] += extra
             self.pump["n"] += 1
             self.pump["last"] = t
+            self.pump["miss"] = 0
         elif self.pump is not None:
-            self.end_pump(d)
+            # A sample taken while the heater switches lands between levels; only end the
+            # run after two quiet samples, so one shot isn't split in two.
+            self.pump["miss"] = self.pump.get("miss", 0) + 1
+            if self.pump["miss"] >= 2:
+                self.end_pump(d)
 
     def end_pump(self, d):
         p, self.pump = self.pump, None
         dur = p["last"] - p["start"] + 2  # one sample period
+        mean = p["wsum"] / p["n"] if p["n"] else 0
+        if mean > 0.6 * float(self.settings.get("heater_w", 600)):
+            return  # samples caught mid-way through the heater switching on, not the pump
         if dur >= 3:  # ignore blips
             d["pump_runs"] += 1
             d["pump_s"] += dur
             d["pump_wsum"] += p["wsum"]
             d["pump_n"] += p["n"]
+            run = {"start": p["start"], "end": p["last"], "dur": dur, "w": p["wsum"] / p["n"] if p["n"] else None}
+            if dur >= SHOT_MIN_S:
+                self.add_shot(run)
+            self.runs.append(run)
+
+    def add_shot(self, run):
+        """A shot just finished: was it purged, and how long had the group sat since water last went through?"""
+        before = [r for r in self.runs if r["end"] <= run["start"]]
+        purge = before[-1] if before and before[-1]["dur"] < SHOT_MIN_S \
+            and run["start"] - before[-1]["end"] <= PURGE_WINDOW_S else None
+        first_draw = purge["start"] if purge else run["start"]
+        earlier = [r for r in before if r is not purge and r["end"] <= first_draw]
+        if earlier:
+            idle, idle_from = first_draw - earlier[-1]["end"], "last draw"
+        else:
+            start = self.session["start"] if self.session else first_draw
+            idle, idle_from = first_draw - start, "switch-on"
+        shot = {"id": secrets.token_hex(4), "t": round(run["start"]), "dur": round(run["dur"]),
+                "pump_w": round(run["w"]) if run["w"] else None, "purged": bool(purge),
+                "purge_s": round(purge["dur"]) if purge else None,
+                "purge_gap_s": round(run["start"] - purge["end"]) if purge else None,
+                "idle_s": round(idle), "idle_from": idle_from,
+                "taste": None, "rating": None, "rating_tags": None, "order": None}
+        self.shots.append(shot)
+        del self.shots[:-SHOTS_KEEP]
+        self.save()
+        log.info("shot: %d s, purged=%s, group idle %d s before (since %s)", shot["dur"], shot["purged"], shot["idle_s"], idle_from)
+        return shot
+
+    # -- shots: feedback and links to orders --
+    def shot(self, sid):
+        return next((x for x in self.shots if x["id"] == sid), None)
+
+    def set_taste(self, sid, taste):
+        x = self.shot(sid)
+        if x is None:
+            raise KeyError(sid)
+        if taste not in TASTES:
+            raise ValueError("pick one of: " + ", ".join(TASTES))
+        x["taste"] = taste
+        self.save()
+        return x
+
+    def link_order(self, oid, now, within_s=15 * 60):
+        """An order was marked made: it was most likely the latest shot without an order."""
+        for x in reversed(self.shots):
+            if now - x["t"] > within_s:
+                break
+            if x["order"] is None:
+                x["order"] = oid
+                self.save()
+                return x
+        return None
+
+    def order_rated(self, oid, beans, tags):
+        for x in reversed(self.shots):
+            if x["order"] == oid:
+                x["rating"], x["rating_tags"] = beans, tags
+                self.save()
+                return x
+        return None
+
+    @staticmethod
+    def public_shot(x):
+        return {k: v for k, v in x.items() if k != "order"} | {"for_order": x["order"] is not None}
+
+    def shots_view(self, n=30):
+        recent = [self.public_shot(x) for x in self.shots[-n:]][::-1]
+        groups = {}
+        for name, sel in (("purged", True), ("not purged", False)):
+            xs = [x for x in self.shots if x["purged"] is sel]
+            tasted = [x for x in xs if x["taste"] and x["taste"] != TASTES[3]]
+            rated = [x["rating"] for x in xs if x["rating"]]
+            groups[name] = {"shots": len(xs), "tasted": len(tasted),
+                            "good_pct": round(100 * sum(x["taste"] == TASTES[0] for x in tasted) / len(tasted)) if tasted else None,
+                            "avg_rating": round(sum(rated) / len(rated), 1) if rated else None}
+        return {"shots": recent, "summary": groups, "tastes": TASTES, "shot_min_s": SHOT_MIN_S, "purge_window_s": PURGE_WINDOW_S}
 
     def end_session(self, t):
         if self.pump is not None:

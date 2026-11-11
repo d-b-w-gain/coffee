@@ -62,6 +62,14 @@ only active orders (up to 24 h) and anonymous totals.
   numbers (energy, warm-up, heater watts and duty, pump runs and watts, grinder
   runs and grams) are kept for a year. Drifts are flagged after a few weeks.
 
+- **Shots and purges.** From the machine's power, a pump run of 15 s or more is
+  a shot, and a short run in the 3 minutes before it is its purge (on a heat
+  exchanger machine like the Minibar the group's water overheats while it sits).
+  Each shot records whether it was purged and how long the group sat since water
+  last went through it. The main page asks how it tasted, and a shot is linked to
+  the order marked made after it, so the drinker's rating lands on it too.
+  Settings → Maintenance compares purged and unpurged shots.
+
 ## Files
 
 | File | What |
@@ -183,6 +191,8 @@ which plug does what.
 | POST | `/api/grinder/teach` | Time a grind (stop it when empty) |
 | GET | `/api/power?minutes=10` | Live watts from a power-measuring plug |
 | GET | `/api/maintenance` | Daily numbers and trend flags |
+| GET | `/api/shots` | Recent shots (purge, idle time, taste, rating) and the purged/unpurged summary |
+| POST | `/api/shots/{id}/taste` | How a shot tasted |
 | GET | `/healthz` | Liveness |
 
 ## Testing
