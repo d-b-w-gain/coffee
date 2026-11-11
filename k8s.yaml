@@ -24,6 +24,8 @@ spec:
         imagePullPolicy: Never
         env:
         - { name: TAPO_HOST, value: "192.168.88.10" }
+        # Links in Signal messages; this name resolves on the home network only.
+        - { name: BASE_URL, value: "https://coffee.home.gainengineering.com.au" }
         - { name: DEFAULT_ON_MINUTES, value: "30" }
         - { name: MAX_ON_MINUTES, value: "60" }
         - { name: TZ, value: "Australia/Sydney" }
