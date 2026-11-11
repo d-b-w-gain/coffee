@@ -349,16 +349,23 @@ class TuyaPlug(Plug):
         if self.dev is None:
             await self._update()
         dp = self.dps_map
-        reply = await asyncio.to_thread(self.dev.set_value, dp["switch"], bool(on))
-        err = self._err(reply) if isinstance(reply, dict) and "dps" not in reply else None
-        if err:
+        sw = str(dp["switch"])
+        last = "no answer"
+        for attempt in range(2):
+            # A fresh connection for every command: on a kept-open one, a reading the plug
+            # pushed earlier can be taken as the answer, and an idle connection the plug has
+            # dropped swallows the command without an error.
+            await asyncio.to_thread(self.dev.close)
+            reply = await asyncio.to_thread(self.dev.set_value, dp["switch"], bool(on))
+            got = reply.get("dps") if isinstance(reply, dict) and isinstance(reply.get("dps"), dict) else {}
+            got = {str(k): v for k, v in got.items()}
+            self.dps.update(got)
+            if sw in got and bool(got[sw]) == bool(on):
+                break  # the plug confirmed the new state
+            last = self._err(reply) or f"didn't confirm switching {'on' if on else 'off'}"
+        else:
             await self.close()
-            raise RuntimeError(f"Tuya plug at {self.host}: {err}")
-        # the plug's answer carries the new state; don't wait for the next status to know it
-        got = reply.get("dps") if isinstance(reply, dict) and isinstance(reply.get("dps"), dict) else {}
-        self.dps.update({str(k): v for k, v in got.items()})
-        if str(dp["switch"]) not in {str(k) for k in got}:
-            self.dps[str(dp["switch"])] = bool(on)
+            raise RuntimeError(f"Tuya plug at {self.host}: {last}")
         if on and self.countdown_s and str(dp["countdown"]) in self.dps:
             # the plug's own countdown: switches itself off if coffee.lan doesn't
             await asyncio.to_thread(self.dev.set_value, dp["countdown"], int(self.countdown_s))

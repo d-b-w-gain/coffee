@@ -21,7 +21,11 @@ class FakeDevice:
         self.dev_id, self.address, self.key, self.version = dev_id, address, local_key, version
 
     def set_socketPersistent(self, p): pass
-    def close(self): pass
+
+    pushed = None
+
+    def close(self):
+        self.pending = self.pushed = None  # a fresh connection: nothing left over
 
     def _ok(self):
         if self.address == "10.9.9.9":
@@ -38,6 +42,9 @@ class FakeDevice:
         if self.pending:  # the plug's late answer to updatedps comes first, power data points only
             reply, self.pending = self.pending, None
             return reply
+        # like the real plug: it pushes a voltage reading a little later, which sits on the
+        # kept-open connection until the next read (or command) picks it up
+        self.pushed = {"dps": {"20": plug_state["20"]}}
         return {"dps": dict(plug_state)}
 
     def updatedps(self, index=None, nowait=False):
@@ -49,6 +56,10 @@ class FakeDevice:
         err = self._ok()
         if err:
             return err
+        stale = self.pending or self.pushed
+        if stale:  # like the real plug on a stale kept-open connection: old message back, command lost
+            self.pending = self.pushed = None
+            return stale
         sets.append((index, value))
         plug_state[str(index)] = value
         if index == 1 and not value:
