@@ -187,12 +187,13 @@
   .shotsec[hidden] { display:none; }
   /* Barista corner: the barista's tools, rolled up out of the customer's way. */
   details.barista { width:min(420px, 100%); }
-  details.barista > summary { list-style:none; cursor:pointer; background:var(--card); border-radius:16px; padding:14px 20px;
-                              box-shadow:0 4px 20px #0002; display:flex; flex-direction:column; gap:2px; }
+  /* display:block, not flex: older Safari won't toggle a <summary> that's a flex box */
+  details.barista > summary { list-style:none; cursor:pointer; background:var(--card); border-radius:16px; padding:16px 20px;
+                              box-shadow:0 4px 20px #0002; display:block; -webkit-tap-highlight-color:transparent; user-select:none; }
+  details.barista > summary .b-title, details.barista > summary .b-hint { display:block; }
+  details.barista > summary .b-title .b-act { float:right; font-weight:600; font-size:14px; color:var(--brew); }
   details.barista > summary::-webkit-details-marker { display:none; }
   details.barista > summary .b-title { font-weight:700; font-size:17px; }
-  details.barista > summary .b-title::after { content:" ▾"; color:var(--muted); font-weight:400; }
-  details.barista[open] > summary .b-title::after { content:" ▴"; }
   details.barista > summary .b-hint { color:var(--muted); font-size:13px; }
   details.barista > summary .b-hint.alert { color:var(--brew); font-weight:600; }
   .barista-body { display:flex; flex-direction:column; align-items:center; gap:16px; margin-top:16px; }
@@ -469,7 +470,7 @@
 
 <details class="barista" id="barista">
   <summary>
-    <span class="b-title">☕ Barista corner</span>
+    <span class="b-title">☕ Barista corner <span class="b-act" id="barista-act">Show ▾</span></span>
     <span class="b-hint" id="barista-hint">grinder · last shot · stock · settings</span>
   </summary>
   <div class="barista-body">
@@ -1217,9 +1218,19 @@ buildBeanPick();
   let open = false;
   try { open = localStorage.getItem('coffee-barista') === '1'; } catch {}
   const target = location.hash && bc.querySelector(location.hash);
+  const label = () => { $('barista-act').textContent = bc.open ? 'Hide ▴' : 'Show ▾'; };
   if (open || target) bc.open = true;
+  label();
   if (target) setTimeout(() => target.scrollIntoView({ behavior: 'smooth', block: 'start' }), 300);
-  bc.addEventListener('toggle', () => { try { localStorage.setItem('coffee-barista', bc.open ? '1' : '0'); } catch {} });
+  // Open and close it ourselves rather than relying on the browser's own <details> toggle,
+  // which some (older Safari, some embedded views) don't do reliably.
+  bc.querySelector('summary').addEventListener('click', e => {
+    e.preventDefault();
+    bc.open = !bc.open;
+    label();
+    try { localStorage.setItem('coffee-barista', bc.open ? '1' : '0'); } catch {}
+    if (bc.open) setTimeout(() => bc.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50);
+  });
 })();
 
 trackMine(); poll(); loadStock(); loadSchedule(); loadHistory(); loadCase();
